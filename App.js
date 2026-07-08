@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -6,7 +6,6 @@ import {
   KeyboardAvoidingView,
   Modal,
   Platform,
-  Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -22,7 +21,8 @@ import * as FileSystem from "expo-file-system/legacy";
 import { decode } from "base64-arraybuffer";
 import { supabase } from "./lib/supabase";
 
-const reactionOptions = ["🔥", "💯", "😮", "🤢"];
+const DEFAULT_REACTION = "👍";
+const QUICK_REACTIONS = ["🔥", "💯", "😮", "🤢"];
 
 const palettes = {
   dark: {
@@ -58,7 +58,7 @@ const palettes = {
 };
 
 function emptyReactions() {
-  return { "🔥": 0, "💯": 0, "😮": 0, "🤢": 0 };
+  return { [DEFAULT_REACTION]: 0, "🔥": 0, "💯": 0, "😮": 0, "🤢": 0 };
 }
 
 function formatDate(dateString) {
@@ -82,18 +82,31 @@ function formatDate(dateString) {
   });
 }
 
+function getTouchDistance(event) {
+  const touches = event.nativeEvent?.touches || [];
+
+  if (touches.length < 2) {
+    return null;
+  }
+
+  const [firstTouch, secondTouch] = touches;
+  const dx = firstTouch.pageX - secondTouch.pageX;
+  const dy = firstTouch.pageY - secondTouch.pageY;
+
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
 export default function App() {
   const [themeMode, setThemeMode] = useState("dark");
   const theme = palettes[themeMode];
   const styles = createStyles(theme);
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const longPressUsedRef = useRef(false);
 
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
   const [commentDrafts, setCommentDrafts] = useState({});
-  const [customEmojiDrafts, setCustomEmojiDrafts] = useState({});
-  const [selectedImageUri, setSelectedImageUri] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -109,6 +122,12 @@ export default function App() {
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [lookupStatus, setLookupStatus] = useState("");
+
+  const [reactionPickerPostId, setReactionPickerPostId] = useState(null);
+  const [customEmojiPostId, setCustomEmojiPostId] = useState(null);
+  const [customEmojiInput, setCustomEmojiInput] = useState("");
+  const [pinchStart, setPinchStart] = useState(null);
+  const [pinchScale, setPinchScale] = useState(null);
 
   const myPosts = posts.filter((post) => post.user === "Blaise");
   const streak = myPosts.length;
@@ -386,6 +405,10 @@ export default function App() {
 
     if (!cleanEmoji) return;
 
+    setReactionPickerPostId(null);
+    setCustomEmojiPostId(null);
+    setCustomEmojiInput("");
+
     setPosts((currentPosts) =>
       currentPosts.map((post) =>
         post.id === postId
@@ -415,17 +438,32 @@ export default function App() {
       });
   }
 
-  function addCustomReaction(postId) {
-    const emoji = (customEmojiDrafts[postId] || "").trim();
+  function handleDefaultReactionPress(postId) {
+    if (longPressUsedRef.current) {
+      longPressUsedRef.current = false;
+      return;
+    }
 
-    if (!emoji) return;
+    reactToPost(postId, DEFAULT_REACTION);
+  }
 
-    reactToPost(postId, emoji);
+  function openReactionPicker(postId) {
+    longPressUsedRef.current = true;
+    setReactionPickerPostId(postId);
+  }
 
-    setCustomEmojiDrafts((drafts) => ({
-      ...drafts,
-      [postId]: "",
-    }));
+  function openCustomEmojiPicker(postId) {
+    setReactionPickerPostId(null);
+    setCustomEmojiInput("");
+    setCustomEmojiPostId(postId);
+  }
+
+  function addCustomReaction() {
+    const cleanEmoji = customEmojiInput.trim();
+
+    if (!cleanEmoji || !customEmojiPostId) return;
+
+    reactToPost(customEmojiPostId, cleanEmoji);
   }
 
   async function addComment(postId) {
@@ -465,6 +503,33 @@ export default function App() {
       Alert.alert("Comment failed", error.message);
       await loadPosts();
     }
+  }
+
+  function shouldSetImageResponder(event) {
+    return (event.nativeEvent?.touches || []).length >= 2;
+  }
+
+  function startPinch(postId, event) {
+    const distance = getTouchDistance(event);
+
+    if (!distance) return;
+
+    setPinchStart({ postId, distance });
+    setPinchScale({ postId, scale: 1 });
+  }
+
+  function movePinch(postId, event) {
+    const distance = getTouchDistance(event);
+
+    if (!distance || !pinchStart || pinchStart.postId !== postId) return;
+
+    const nextScale = Math.min(Math.max(distance / pinchStart.distance, 1), 3);
+    setPinchScale({ postId, scale: nextScale });
+  }
+
+  function endPinch() {
+    setPinchStart(null);
+    setPinchScale(null);
   }
 
   function renderStepHeader() {
@@ -527,7 +592,11 @@ export default function App() {
             <Text style={styles.primaryButtonText}>Next</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={styles.primaryButton} onPress={postBev} disabled={saving}>
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={postBev}
+            disabled={saving}
+          >
             <Text style={styles.primaryButtonText}>
               {saving ? "Posting..." : "Post Bev"}
             </Text>
@@ -567,115 +636,100 @@ export default function App() {
           </TouchableOpacity>
         </View>
 
-        {posts.map((post) => (
-          <View key={post.id} style={styles.feedCard}>
-            <View style={styles.cardTop}>
-              <View>
-                <Text style={styles.username}>{post.user}</Text>
-                <Text style={styles.date}>{post.date}</Text>
+        {posts.map((post) => {
+          const currentScale =
+            pinchScale?.postId === post.id ? pinchScale.scale : 1;
+
+          return (
+            <View key={post.id} style={styles.feedCard}>
+              <View style={styles.cardTop}>
+                <View>
+                  <Text style={styles.username}>{post.user}</Text>
+                  <Text style={styles.date}>{post.date}</Text>
+                </View>
+
+                <View style={styles.categoryPill}>
+                  <Text style={styles.categoryPillText}>{post.category}</Text>
+                </View>
               </View>
 
-              <View style={styles.categoryPill}>
-                <Text style={styles.categoryPillText}>{post.category}</Text>
-              </View>
-            </View>
-
-            {post.imageUri ? (
-              <TouchableOpacity
-                activeOpacity={0.92}
-                onPress={() => setSelectedImageUri(post.imageUri)}
-              >
-                <Image
-                  source={{ uri: post.imageUri }}
-                  style={styles.postImage}
-                  resizeMode="cover"
-                />
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.placeholderPortrait}>
-                <Text style={styles.photoText}>4:5 bev photo</Text>
-              </View>
-            )}
-
-            <Text style={styles.bevName}>{post.brand}</Text>
-            <Text style={styles.flavorName}>{post.flavor}</Text>
-
-            <View style={styles.metaRow}>
-              <Text style={styles.rating}>Rating: {post.rating}/10</Text>
-            </View>
-
-            {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
-
-            <View style={styles.reactionRow}>
-              {Array.from(
-                new Set([...reactionOptions, ...Object.keys(post.reactions || {})])
-              ).map((emoji) => (
-                <TouchableOpacity
-                  key={emoji}
-                  style={styles.reactionButton}
-                  onPress={() => reactToPost(post.id, emoji)}
+              {post.imageUri ? (
+                <View
+                  style={styles.postImageFrame}
+                  onStartShouldSetResponder={shouldSetImageResponder}
+                  onMoveShouldSetResponder={shouldSetImageResponder}
+                  onResponderStart={(event) => startPinch(post.id, event)}
+                  onResponderMove={(event) => movePinch(post.id, event)}
+                  onResponderRelease={endPinch}
+                  onResponderTerminate={endPinch}
                 >
-                  <Text style={styles.reactionText}>
-                    {emoji} {post.reactions?.[emoji] || 0}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+                  <Image
+                    source={{ uri: post.imageUri }}
+                    style={[
+                      styles.postImage,
+                      { transform: [{ scale: currentScale }] },
+                    ]}
+                    resizeMode="cover"
+                  />
+                </View>
+              ) : (
+                <View style={styles.placeholderPortrait}>
+                  <Text style={styles.photoText}>4:5 bev photo</Text>
+                </View>
+              )}
 
-            <View style={styles.customReactionRow}>
-              <TextInput
-                style={styles.emojiInput}
-                placeholder="any emoji"
-                placeholderTextColor={theme.muted}
-                value={customEmojiDrafts[post.id] || ""}
-                onChangeText={(text) =>
-                  setCustomEmojiDrafts({
-                    ...customEmojiDrafts,
-                    [post.id]: text,
-                  })
-                }
-                maxLength={8}
-              />
+              <Text style={styles.bevName}>{post.brand}</Text>
+              <Text style={styles.flavorName}>{post.flavor}</Text>
 
-              <TouchableOpacity
-                style={styles.emojiButton}
-                onPress={() => addCustomReaction(post.id)}
-              >
-                <Text style={styles.emojiButtonText}>React</Text>
-              </TouchableOpacity>
-            </View>
-
-            {post.comments.length > 0 ? (
-              <View style={styles.commentsBox}>
-                {post.comments.map((comment) => (
-                  <Text key={comment.id} style={styles.commentText}>
-                    <Text style={styles.commentUser}>{comment.user}: </Text>
-                    {comment.text}
-                  </Text>
-                ))}
+              <View style={styles.metaRow}>
+                <Text style={styles.rating}>Rating: {post.rating}/10</Text>
               </View>
-            ) : null}
 
-            <View style={styles.commentRow}>
-              <TextInput
-                style={styles.commentInput}
-                placeholder="leave a comment"
-                placeholderTextColor={theme.muted}
-                value={commentDrafts[post.id] || ""}
-                onChangeText={(text) =>
-                  setCommentDrafts({ ...commentDrafts, [post.id]: text })
-                }
-              />
+              {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
 
               <TouchableOpacity
-                style={styles.commentButton}
-                onPress={() => addComment(post.id)}
+                style={styles.defaultReactionButton}
+                onPress={() => handleDefaultReactionPress(post.id)}
+                onLongPress={() => openReactionPicker(post.id)}
+                delayLongPress={260}
               >
-                <Text style={styles.commentButtonText}>Send</Text>
+                <Text style={styles.defaultReactionText}>
+                  {DEFAULT_REACTION} {post.reactions?.[DEFAULT_REACTION] || 0}
+                </Text>
               </TouchableOpacity>
+
+              {post.comments.length > 0 ? (
+                <View style={styles.commentsBox}>
+                  {post.comments.map((comment) => (
+                    <Text key={comment.id} style={styles.commentText}>
+                      <Text style={styles.commentUser}>{comment.user}: </Text>
+                      {comment.text}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+
+              <View style={styles.commentRow}>
+                <TextInput
+                  style={styles.commentInput}
+                  placeholder="leave a comment"
+                  placeholderTextColor={theme.muted}
+                  value={commentDrafts[post.id] || ""}
+                  onChangeText={(text) =>
+                    setCommentDrafts({ ...commentDrafts, [post.id]: text })
+                  }
+                />
+
+                <TouchableOpacity
+                  style={styles.commentButton}
+                  onPress={() => addComment(post.id)}
+                >
+                  <Text style={styles.commentButtonText}>➤</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
-        ))}
+          );
+        })}
       </ScrollView>
     );
   }
@@ -936,6 +990,95 @@ export default function App() {
     );
   }
 
+  function renderReactionPicker() {
+    return (
+      <Modal
+        visible={!!reactionPickerPostId}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReactionPickerPostId(null)}
+      >
+        <View style={styles.pickerBackdrop}>
+          <TouchableOpacity
+            style={styles.pickerBackdropPressTarget}
+            activeOpacity={1}
+            onPress={() => setReactionPickerPostId(null)}
+          />
+
+          <View style={styles.reactionPicker}>
+            {QUICK_REACTIONS.map((emoji) => (
+              <TouchableOpacity
+                key={emoji}
+                style={styles.pickerReactionButton}
+                onPress={() => reactToPost(reactionPickerPostId, emoji)}
+              >
+                <Text style={styles.pickerReactionText}>{emoji}</Text>
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity
+              style={styles.pickerReactionButton}
+              onPress={() => openCustomEmojiPicker(reactionPickerPostId)}
+            >
+              <Text style={styles.pickerPlusText}>＋</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    );
+  }
+
+  function renderCustomEmojiPicker() {
+    return (
+      <Modal
+        visible={!!customEmojiPostId}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCustomEmojiPostId(null)}
+      >
+        <View style={styles.pickerBackdrop}>
+          <TouchableOpacity
+            style={styles.pickerBackdropPressTarget}
+            activeOpacity={1}
+            onPress={() => setCustomEmojiPostId(null)}
+          />
+
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            style={styles.customEmojiCard}
+          >
+            <Text style={styles.customEmojiTitle}>Choose emoji</Text>
+            <TextInput
+              style={styles.customEmojiInput}
+              value={customEmojiInput}
+              onChangeText={setCustomEmojiInput}
+              placeholder="emoji"
+              placeholderTextColor={theme.muted}
+              autoFocus
+              maxLength={8}
+            />
+
+            <View style={styles.customEmojiActions}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => setCustomEmojiPostId(null)}
+              >
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.modalConfirmButton}
+                onPress={addCustomReaction}
+              >
+                <Text style={styles.modalConfirmText}>React</Text>
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
@@ -981,27 +1124,8 @@ export default function App() {
         </View>
       ) : null}
 
-      <Modal
-        visible={!!selectedImageUri}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setSelectedImageUri(null)}
-      >
-        <Pressable
-          style={styles.imageModalBackdrop}
-          onPress={() => setSelectedImageUri(null)}
-        >
-          {selectedImageUri ? (
-            <Image
-              source={{ uri: selectedImageUri }}
-              style={styles.fullscreenImage}
-              resizeMode="contain"
-            />
-          ) : null}
-
-          <Text style={styles.modalHint}>tap anywhere to close</Text>
-        </Pressable>
-      </Modal>
+      {renderReactionPicker()}
+      {renderCustomEmojiPicker()}
     </SafeAreaView>
   );
 }
@@ -1143,6 +1267,19 @@ function createStyles(theme) {
       fontWeight: "900",
       fontSize: 12,
     },
+    postImageFrame: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      borderRadius: 24,
+      marginBottom: 14,
+      overflow: "hidden",
+      backgroundColor: theme.surface2,
+    },
+    postImage: {
+      width: "100%",
+      height: "100%",
+      backgroundColor: theme.surface2,
+    },
     placeholderPortrait: {
       width: "100%",
       aspectRatio: 4 / 5,
@@ -1154,12 +1291,9 @@ function createStyles(theme) {
       borderWidth: 1,
       borderColor: theme.border,
     },
-    postImage: {
-      width: "100%",
-      aspectRatio: 4 / 5,
-      borderRadius: 24,
-      marginBottom: 14,
-      backgroundColor: theme.surface2,
+    photoText: {
+      color: theme.muted,
+      fontWeight: "800",
     },
     bevName: {
       color: theme.text,
@@ -1193,52 +1327,20 @@ function createStyles(theme) {
       overflow: "hidden",
       marginBottom: 12,
     },
-    reactionRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 8,
-      marginBottom: 12,
-    },
-    reactionButton: {
-      backgroundColor: theme.surface2,
-      paddingHorizontal: 12,
-      paddingVertical: 9,
-      borderRadius: 999,
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    reactionText: {
-      color: theme.text,
-      fontWeight: "900",
-    },
-    customReactionRow: {
-      flexDirection: "row",
-      gap: 8,
-      alignItems: "center",
-      marginBottom: 12,
-    },
-    emojiInput: {
-      flex: 1,
-      backgroundColor: theme.input,
-      color: theme.text,
-      borderRadius: 999,
-      paddingHorizontal: 14,
-      paddingVertical: 11,
-      borderWidth: 1,
-      borderColor: theme.border,
-      fontSize: 16,
-    },
-    emojiButton: {
+    defaultReactionButton: {
+      alignSelf: "flex-start",
       backgroundColor: theme.surface2,
       paddingHorizontal: 14,
-      paddingVertical: 11,
+      paddingVertical: 10,
       borderRadius: 999,
       borderWidth: 1,
       borderColor: theme.border,
+      marginBottom: 12,
     },
-    emojiButtonText: {
+    defaultReactionText: {
       color: theme.text,
       fontWeight: "900",
+      fontSize: 15,
     },
     commentsBox: {
       backgroundColor: theme.surface2,
@@ -1271,31 +1373,116 @@ function createStyles(theme) {
       borderColor: theme.border,
     },
     commentButton: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
       backgroundColor: theme.primary,
-      paddingHorizontal: 14,
-      paddingVertical: 11,
-      borderRadius: 999,
+      alignItems: "center",
+      justifyContent: "center",
     },
     commentButtonText: {
       color: "#0B0D0C",
       fontWeight: "900",
+      fontSize: 18,
+      marginLeft: 2,
     },
-    imageModalBackdrop: {
+    pickerBackdrop: {
       flex: 1,
-      backgroundColor: "rgba(0,0,0,0.92)",
+      backgroundColor: "rgba(0,0,0,0.34)",
       alignItems: "center",
       justifyContent: "center",
-      padding: 16,
+      padding: 20,
     },
-    fullscreenImage: {
+    pickerBackdropPressTarget: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    reactionPicker: {
+      backgroundColor: theme.surface,
+      borderRadius: 999,
+      padding: 10,
+      flexDirection: "row",
+      gap: 8,
+      borderWidth: 1,
+      borderColor: theme.border,
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 18,
+      elevation: 8,
+    },
+    pickerReactionButton: {
+      width: 46,
+      height: 46,
+      borderRadius: 23,
+      backgroundColor: theme.surface2,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    pickerReactionText: {
+      fontSize: 23,
+    },
+    pickerPlusText: {
+      color: theme.text,
+      fontSize: 25,
+      fontWeight: "700",
+    },
+    customEmojiCard: {
       width: "100%",
-      height: "82%",
+      maxWidth: 340,
+      backgroundColor: theme.surface,
+      borderRadius: 26,
+      padding: 18,
+      borderWidth: 1,
+      borderColor: theme.border,
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 18,
+      elevation: 8,
     },
-    modalHint: {
-      color: "#FFFFFF",
-      fontWeight: "800",
-      marginTop: 14,
-      opacity: 0.7,
+    customEmojiTitle: {
+      color: theme.text,
+      fontSize: 20,
+      fontWeight: "900",
+      marginBottom: 12,
+    },
+    customEmojiInput: {
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: 18,
+      padding: 15,
+      borderWidth: 1,
+      borderColor: theme.border,
+      fontSize: 22,
+      marginBottom: 14,
+    },
+    customEmojiActions: {
+      flexDirection: "row",
+      gap: 10,
+    },
+    modalCancelButton: {
+      flex: 1,
+      backgroundColor: theme.surface2,
+      borderRadius: 18,
+      padding: 14,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    modalCancelText: {
+      color: theme.text,
+      fontWeight: "900",
+    },
+    modalConfirmButton: {
+      flex: 1,
+      backgroundColor: theme.primary,
+      borderRadius: 18,
+      padding: 14,
+      alignItems: "center",
+    },
+    modalConfirmText: {
+      color: "#0B0D0C",
+      fontWeight: "900",
     },
     stepWrap: {
       flexDirection: "row",
@@ -1342,151 +1529,6 @@ function createStyles(theme) {
     stepLabelActive: {
       color: theme.text,
     },
-    wizardCard: {
-      backgroundColor: theme.surface,
-      borderRadius: 30,
-      padding: 16,
-      borderWidth: 1,
-      borderColor: theme.border,
-      marginBottom: 16,
-    },
-    cardTitle: {
-      color: theme.text,
-      fontSize: 24,
-      fontWeight: "900",
-      letterSpacing: -0.6,
-    },
-    cardHint: {
-      color: theme.muted,
-      lineHeight: 20,
-      marginTop: 6,
-      marginBottom: 16,
-    },
-    photoPicker: {
-      width: "100%",
-      aspectRatio: 4 / 5,
-      backgroundColor: theme.surface2,
-      borderRadius: 28,
-      overflow: "hidden",
-      borderWidth: 1,
-      borderColor: theme.border,
-      marginBottom: 12,
-    },
-    photoEmpty: {
-      flex: 1,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    photoIcon: {
-      color: theme.primary,
-      fontSize: 42,
-      fontWeight: "300",
-      marginBottom: 4,
-    },
-    photoText: {
-      color: theme.muted,
-      fontWeight: "800",
-    },
-    previewImage: {
-      width: "100%",
-      height: "100%",
-    },
-    secondaryFull: {
-      backgroundColor: theme.surface2,
-      borderColor: theme.border,
-      borderWidth: 1,
-      padding: 15,
-      borderRadius: 18,
-      alignItems: "center",
-    },
-    inputLabel: {
-      color: theme.text,
-      fontWeight: "900",
-      marginBottom: 8,
-      marginTop: 6,
-    },
-    input: {
-      backgroundColor: theme.input,
-      color: theme.text,
-      borderRadius: 18,
-      padding: 15,
-      marginBottom: 12,
-      borderWidth: 1,
-      borderColor: theme.border,
-      fontSize: 16,
-    },
-    captionInput: {
-      minHeight: 105,
-      textAlignVertical: "top",
-      lineHeight: 22,
-    },
-    scanButton: {
-      backgroundColor: theme.primary,
-      padding: 16,
-      borderRadius: 20,
-      alignItems: "center",
-      marginBottom: 12,
-    },
-    scanButtonText: {
-      color: "#0B0D0C",
-      fontSize: 16,
-      fontWeight: "900",
-    },
-    lookupText: {
-      color: theme.muted,
-      marginBottom: 10,
-      fontWeight: "700",
-    },
-    chipRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 8,
-      marginTop: 2,
-    },
-    chip: {
-      backgroundColor: theme.surface2,
-      borderColor: theme.border,
-      borderWidth: 1,
-      paddingHorizontal: 13,
-      paddingVertical: 10,
-      borderRadius: 999,
-    },
-    chipActive: {
-      backgroundColor: theme.primary,
-      borderColor: theme.primary,
-    },
-    chipText: {
-      color: theme.muted,
-      fontWeight: "900",
-    },
-    chipTextActive: {
-      color: "#0B0D0C",
-    },
-    ratingRow: {
-      flexDirection: "row",
-      gap: 8,
-      marginBottom: 12,
-    },
-    ratingChip: {
-      flex: 1,
-      backgroundColor: theme.surface2,
-      borderColor: theme.border,
-      borderWidth: 1,
-      paddingVertical: 13,
-      borderRadius: 16,
-      alignItems: "center",
-    },
-    ratingChipActive: {
-      backgroundColor: theme.primary,
-      borderColor: theme.primary,
-    },
-    ratingChipText: {
-      color: theme.muted,
-      fontWeight: "900",
-    },
-    ratingChipTextActive: {
-      color: "#0B0D0C",
-    },
     wizardButtons: {
       flexDirection: "row",
       gap: 10,
@@ -1517,24 +1559,6 @@ function createStyles(theme) {
       color: theme.text,
       fontSize: 16,
       fontWeight: "900",
-    },
-    reviewImage: {
-      width: "100%",
-      aspectRatio: 4 / 5,
-      borderRadius: 24,
-      marginBottom: 16,
-      backgroundColor: theme.surface2,
-    },
-    reviewBrand: {
-      color: theme.text,
-      fontSize: 24,
-      fontWeight: "900",
-    },
-    reviewFlavor: {
-      color: theme.muted,
-      fontSize: 16,
-      fontWeight: "800",
-      marginBottom: 14,
     },
     scannerScreen: {
       flex: 1,
@@ -1581,6 +1605,165 @@ function createStyles(theme) {
     scannerCloseText: {
       color: "#111111",
       fontWeight: "900",
+    },
+    wizardCard: {
+      backgroundColor: theme.surface,
+      borderRadius: 30,
+      padding: 16,
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: 16,
+    },
+    cardTitle: {
+      color: theme.text,
+      fontSize: 24,
+      fontWeight: "900",
+      letterSpacing: -0.6,
+    },
+    cardHint: {
+      color: theme.muted,
+      lineHeight: 20,
+      marginTop: 6,
+      marginBottom: 16,
+    },
+    photoPicker: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      backgroundColor: theme.surface2,
+      borderRadius: 28,
+      overflow: "hidden",
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: 12,
+    },
+    previewImage: {
+      width: "100%",
+      height: "100%",
+    },
+    photoEmpty: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    photoIcon: {
+      color: theme.primary,
+      fontSize: 42,
+      fontWeight: "300",
+      marginBottom: 4,
+    },
+    secondaryFull: {
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      padding: 15,
+      borderRadius: 18,
+      alignItems: "center",
+    },
+    scanButton: {
+      backgroundColor: theme.primary,
+      padding: 16,
+      borderRadius: 20,
+      alignItems: "center",
+      marginBottom: 12,
+    },
+    scanButtonText: {
+      color: "#0B0D0C",
+      fontSize: 16,
+      fontWeight: "900",
+    },
+    lookupText: {
+      color: theme.muted,
+      marginBottom: 10,
+      fontWeight: "700",
+    },
+    inputLabel: {
+      color: theme.text,
+      fontWeight: "900",
+      marginBottom: 8,
+      marginTop: 6,
+    },
+    input: {
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: 18,
+      padding: 15,
+      marginBottom: 12,
+      borderWidth: 1,
+      borderColor: theme.border,
+      fontSize: 16,
+    },
+    chipRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+      marginTop: 2,
+    },
+    chip: {
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      paddingHorizontal: 13,
+      paddingVertical: 10,
+      borderRadius: 999,
+    },
+    chipActive: {
+      backgroundColor: theme.primary,
+      borderColor: theme.primary,
+    },
+    chipText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    chipTextActive: {
+      color: "#0B0D0C",
+    },
+    reviewImage: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      borderRadius: 24,
+      marginBottom: 16,
+      backgroundColor: theme.surface2,
+    },
+    reviewBrand: {
+      color: theme.text,
+      fontSize: 24,
+      fontWeight: "900",
+    },
+    reviewFlavor: {
+      color: theme.muted,
+      fontSize: 16,
+      fontWeight: "800",
+      marginBottom: 14,
+    },
+    ratingRow: {
+      flexDirection: "row",
+      gap: 8,
+      marginBottom: 12,
+    },
+    ratingChip: {
+      flex: 1,
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      paddingVertical: 13,
+      borderRadius: 16,
+      alignItems: "center",
+    },
+    ratingChipActive: {
+      backgroundColor: theme.primary,
+      borderColor: theme.primary,
+    },
+    ratingChipText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    ratingChipTextActive: {
+      color: "#0B0D0C",
+    },
+    captionInput: {
+      minHeight: 105,
+      textAlignVertical: "top",
+      lineHeight: 22,
     },
     historyItem: {
       backgroundColor: theme.surface,

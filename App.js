@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Alert,
   Image,
@@ -11,45 +11,16 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  ActivityIndicator,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as FileSystem from "expo-file-system/legacy";
+import { decode } from "base64-arraybuffer";
+import { supabase } from "./lib/supabase";
 
 const reactionOptions = ["🔥", "💯", "😮", "🤢"];
-
-const starterPosts = [
-  {
-    id: 1,
-    user: "Blaise",
-    brand: "Ghost",
-    flavor: "Sour Patch Blue Raspberry",
-    category: "Energy",
-    rating: "9",
-    caption: "Elite gas station find.",
-    date: "Today",
-    barcode: "Example",
-    imageUri: null,
-    reactions: { "🔥": 4, "💯": 2, "😮": 1, "🤢": 0 },
-    comments: [
-      { id: 1, user: "Tyler", text: "That one is solid." },
-    ],
-  },
-  {
-    id: 2,
-    user: "Tyler",
-    brand: "Monster",
-    flavor: "Ultra White",
-    category: "Energy",
-    rating: "8",
-    caption: "Reliable.",
-    date: "Today",
-    barcode: null,
-    imageUri: null,
-    reactions: { "🔥": 2, "💯": 1, "😮": 0, "🤢": 0 },
-    comments: [],
-  },
-];
 
 const palettes = {
   dark: {
@@ -84,6 +55,31 @@ const palettes = {
   },
 };
 
+function emptyReactions() {
+  return { "🔥": 0, "💯": 0, "😮": 0, "🤢": 0 };
+}
+
+function formatDate(dateString) {
+  const date = new Date(dateString);
+  const today = new Date();
+
+  if (date.toDateString() === today.toDateString()) {
+    return "Today";
+  }
+
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (date.toDateString() === yesterday.toDateString()) {
+    return "Yesterday";
+  }
+
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export default function App() {
   const [themeMode, setThemeMode] = useState("dark");
   const theme = palettes[themeMode];
@@ -92,8 +88,11 @@ export default function App() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
   const [activeTab, setActiveTab] = useState("Feed");
-  const [posts, setPosts] = useState(starterPosts);
+  const [posts, setPosts] = useState([]);
   const [commentDrafts, setCommentDrafts] = useState({});
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   const [postStep, setPostStep] = useState(0);
   const [imageUri, setImageUri] = useState(null);
@@ -112,6 +111,10 @@ export default function App() {
   const steps = ["Photo", "Scan", "Post"];
   const categories = ["Energy", "Soda", "Coffee", "Water", "Other"];
 
+  useEffect(() => {
+    loadPosts();
+  }, []);
+
   function toggleTheme() {
     setThemeMode(themeMode === "dark" ? "light" : "dark");
   }
@@ -128,6 +131,103 @@ export default function App() {
     setScannerOpen(false);
     setScanned(false);
     setLookupStatus("");
+  }
+
+  async function loadPosts() {
+    setLoading(true);
+
+    const { data: postRows, error: postError } = await supabase
+      .from("posts")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (postError) {
+      setLoading(false);
+      Alert.alert("Supabase error", postError.message);
+      return;
+    }
+
+    const postIds = postRows.map((post) => post.id);
+
+    let reactionRows = [];
+    let commentRows = [];
+
+    if (postIds.length > 0) {
+      const { data: reactionsData } = await supabase
+        .from("reactions")
+        .select("post_id, emoji")
+        .in("post_id", postIds);
+
+      const { data: commentsData } = await supabase
+        .from("comments")
+        .select("id, post_id, user_name, text, created_at")
+        .in("post_id", postIds)
+        .order("created_at", { ascending: true });
+
+      reactionRows = reactionsData || [];
+      commentRows = commentsData || [];
+    }
+
+    const builtPosts = postRows.map((row) => {
+      const reactions = emptyReactions();
+
+      reactionRows
+        .filter((reaction) => reaction.post_id === row.id)
+        .forEach((reaction) => {
+          reactions[reaction.emoji] = (reactions[reaction.emoji] || 0) + 1;
+        });
+
+      const comments = commentRows
+        .filter((comment) => comment.post_id === row.id)
+        .map((comment) => ({
+          id: comment.id,
+          user: comment.user_name,
+          text: comment.text,
+        }));
+
+      return {
+        id: row.id,
+        user: row.user_name,
+        brand: row.brand,
+        flavor: row.flavor,
+        category: row.category,
+        rating: row.rating || "-",
+        caption: row.caption || "",
+        date: formatDate(row.created_at),
+        barcode: row.barcode,
+        imageUri: row.image_url,
+        reactions,
+        comments,
+      };
+    });
+
+    setPosts(builtPosts);
+    setLoading(false);
+  }
+
+  async function uploadImageToSupabase(uri) {
+    const fileExt = uri.split(".").pop()?.split("?")[0] || "jpg";
+    const contentType = fileExt.toLowerCase() === "png" ? "image/png" : "image/jpeg";
+    const fileName = `bev-${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
+
+    const base64 = await FileSystem.readAsStringAsync(uri, {
+      encoding: "base64",
+    });
+
+    const { error: uploadError } = await supabase.storage
+      .from("bev-photos")
+      .upload(fileName, decode(base64), {
+        contentType,
+        upsert: false,
+      });
+
+    if (uploadError) {
+      throw uploadError;
+    }
+
+    const { data } = supabase.storage.from("bev-photos").getPublicUrl(fileName);
+
+    return data.publicUrl;
   }
 
   async function takePhoto() {
@@ -238,68 +338,75 @@ export default function App() {
     }
   }
 
-  function postBev() {
+  async function postBev() {
     if (!imageUri || !brand.trim() || !flavor.trim()) {
       Alert.alert("Missing info", "Add a photo, brand, and flavor first.");
       return;
     }
 
-    const newPost = {
-      id: Date.now(),
-      user: "Blaise",
-      brand: brand.trim(),
-      flavor: flavor.trim(),
-      category,
-      rating: rating.trim() || "-",
-      caption: caption.trim(),
-      date: "Today",
-      barcode: barcode || null,
-      imageUri,
-      reactions: { "🔥": 0, "💯": 0, "😮": 0, "🤢": 0 },
-      comments: [],
-    };
+    setSaving(true);
 
-    setPosts([newPost, ...posts]);
-    resetPostFlow();
-    setActiveTab("Feed");
+    try {
+      const uploadedImageUrl = await uploadImageToSupabase(imageUri);
+
+      const { error } = await supabase.from("posts").insert({
+        user_name: "Blaise",
+        brand: brand.trim(),
+        flavor: flavor.trim(),
+        category,
+        rating: rating.trim() || "-",
+        caption: caption.trim(),
+        barcode: barcode || null,
+        image_url: uploadedImageUrl,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      resetPostFlow();
+      setActiveTab("Feed");
+      await loadPosts();
+    } catch (error) {
+      Alert.alert("Save failed", error.message || "Could not save your bev.");
+    }
+
+    setSaving(false);
   }
 
-  function reactToPost(postId, emoji) {
-    setPosts(
-      posts.map((post) =>
-        post.id === postId
-          ? {
-              ...post,
-              reactions: {
-                ...post.reactions,
-                [emoji]: (post.reactions[emoji] || 0) + 1,
-              },
-            }
-          : post
-      )
-    );
+  async function reactToPost(postId, emoji) {
+    const { error } = await supabase.from("reactions").insert({
+      post_id: postId,
+      emoji,
+      user_name: "Blaise",
+    });
+
+    if (error) {
+      Alert.alert("Reaction failed", error.message);
+      return;
+    }
+
+    await loadPosts();
   }
 
-  function addComment(postId) {
+  async function addComment(postId) {
     const text = (commentDrafts[postId] || "").trim();
 
     if (!text) return;
 
-    setPosts(
-      posts.map((post) =>
-        post.id === postId
-          ? {
-              ...post,
-              comments: [
-                ...post.comments,
-                { id: Date.now(), user: "Blaise", text },
-              ],
-            }
-          : post
-      )
-    );
+    const { error } = await supabase.from("comments").insert({
+      post_id: postId,
+      user_name: "Blaise",
+      text,
+    });
+
+    if (error) {
+      Alert.alert("Comment failed", error.message);
+      return;
+    }
 
     setCommentDrafts({ ...commentDrafts, [postId]: "" });
+    await loadPosts();
   }
 
   function renderStepHeader() {
@@ -343,11 +450,16 @@ export default function App() {
           <TouchableOpacity
             style={styles.secondaryButton}
             onPress={() => setPostStep(postStep - 1)}
+            disabled={saving}
           >
             <Text style={styles.secondaryButtonText}>Back</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={styles.secondaryButton} onPress={resetPostFlow}>
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            onPress={resetPostFlow}
+            disabled={saving}
+          >
             <Text style={styles.secondaryButtonText}>Clear</Text>
           </TouchableOpacity>
         )}
@@ -357,8 +469,10 @@ export default function App() {
             <Text style={styles.primaryButtonText}>Next</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity style={styles.primaryButton} onPress={postBev}>
-            <Text style={styles.primaryButtonText}>Post Bev</Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={postBev} disabled={saving}>
+            <Text style={styles.primaryButtonText}>
+              {saving ? "Posting..." : "Post Bev"}
+            </Text>
           </TouchableOpacity>
         )}
       </View>
@@ -366,6 +480,15 @@ export default function App() {
   }
 
   function renderFeed() {
+    if (loading) {
+      return (
+        <View style={styles.loadingScreen}>
+          <ActivityIndicator size="large" color={theme.primary} />
+          <Text style={styles.loadingText}>Loading bevcrew...</Text>
+        </View>
+      );
+    }
+
     return (
       <ScrollView
         style={styles.content}
@@ -416,9 +539,7 @@ export default function App() {
 
             <View style={styles.metaRow}>
               <Text style={styles.rating}>Rating: {post.rating}/10</Text>
-              {post.barcode ? (
-                <Text style={styles.barcodeSmall}>UPC saved</Text>
-              ) : null}
+              {post.barcode ? <Text style={styles.barcodeSmall}>UPC saved</Text> : null}
             </View>
 
             {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
@@ -559,13 +680,8 @@ export default function App() {
                 <Text style={styles.scanButtonText}>Scan Barcode</Text>
               </TouchableOpacity>
 
-              {barcode ? (
-                <Text style={styles.lookupText}>Barcode: {barcode}</Text>
-              ) : null}
-
-              {lookupStatus ? (
-                <Text style={styles.lookupText}>{lookupStatus}</Text>
-              ) : null}
+              {barcode ? <Text style={styles.lookupText}>Barcode: {barcode}</Text> : null}
+              {lookupStatus ? <Text style={styles.lookupText}>{lookupStatus}</Text> : null}
 
               <Text style={styles.inputLabel}>Brand</Text>
               <TextInput
@@ -590,10 +706,7 @@ export default function App() {
                 {categories.map((item) => (
                   <TouchableOpacity
                     key={item}
-                    style={[
-                      styles.chip,
-                      category === item && styles.chipActive,
-                    ]}
+                    style={[styles.chip, category === item && styles.chipActive]}
                     onPress={() => setCategory(item)}
                   >
                     <Text
@@ -789,6 +902,16 @@ function createStyles(theme) {
     container: {
       flex: 1,
       backgroundColor: theme.bg,
+    },
+    loadingScreen: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 12,
+    },
+    loadingText: {
+      color: theme.muted,
+      fontWeight: "800",
     },
     header: {
       paddingHorizontal: 18,

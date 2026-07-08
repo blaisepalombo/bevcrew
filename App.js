@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -11,7 +14,6 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  ActivityIndicator,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
@@ -90,6 +92,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
   const [commentDrafts, setCommentDrafts] = useState({});
+  const [customEmojiDrafts, setCustomEmojiDrafts] = useState({});
+  const [selectedImageUri, setSelectedImageUri] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -207,8 +211,11 @@ export default function App() {
 
   async function uploadImageToSupabase(uri) {
     const fileExt = uri.split(".").pop()?.split("?")[0] || "jpg";
-    const contentType = fileExt.toLowerCase() === "png" ? "image/png" : "image/jpeg";
-    const fileName = `bev-${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
+    const contentType =
+      fileExt.toLowerCase() === "png" ? "image/png" : "image/jpeg";
+    const fileName = `bev-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2)}.${fileExt}`;
 
     const base64 = await FileSystem.readAsStringAsync(uri, {
       encoding: "base64",
@@ -374,25 +381,79 @@ export default function App() {
     setSaving(false);
   }
 
-  async function reactToPost(postId, emoji) {
-    const { error } = await supabase.from("reactions").insert({
-      post_id: postId,
-      emoji,
-      user_name: "Blaise",
-    });
+  function reactToPost(postId, emoji) {
+    const cleanEmoji = emoji.trim();
 
-    if (error) {
-      Alert.alert("Reaction failed", error.message);
-      return;
-    }
+    if (!cleanEmoji) return;
 
-    await loadPosts();
+    setPosts((currentPosts) =>
+      currentPosts.map((post) =>
+        post.id === postId
+          ? {
+              ...post,
+              reactions: {
+                ...post.reactions,
+                [cleanEmoji]: (post.reactions?.[cleanEmoji] || 0) + 1,
+              },
+            }
+          : post
+      )
+    );
+
+    supabase
+      .from("reactions")
+      .insert({
+        post_id: postId,
+        emoji: cleanEmoji,
+        user_name: "Blaise",
+      })
+      .then(({ error }) => {
+        if (error) {
+          Alert.alert("Reaction failed", error.message);
+          loadPosts();
+        }
+      });
+  }
+
+  function addCustomReaction(postId) {
+    const emoji = (customEmojiDrafts[postId] || "").trim();
+
+    if (!emoji) return;
+
+    reactToPost(postId, emoji);
+
+    setCustomEmojiDrafts((drafts) => ({
+      ...drafts,
+      [postId]: "",
+    }));
   }
 
   async function addComment(postId) {
     const text = (commentDrafts[postId] || "").trim();
 
     if (!text) return;
+
+    const tempComment = {
+      id: `temp-${Date.now()}`,
+      user: "Blaise",
+      text,
+    };
+
+    setPosts((currentPosts) =>
+      currentPosts.map((post) =>
+        post.id === postId
+          ? {
+              ...post,
+              comments: [...(post.comments || []), tempComment],
+            }
+          : post
+      )
+    );
+
+    setCommentDrafts((drafts) => ({
+      ...drafts,
+      [postId]: "",
+    }));
 
     const { error } = await supabase.from("comments").insert({
       post_id: postId,
@@ -402,11 +463,8 @@ export default function App() {
 
     if (error) {
       Alert.alert("Comment failed", error.message);
-      return;
+      await loadPosts();
     }
-
-    setCommentDrafts({ ...commentDrafts, [postId]: "" });
-    await loadPosts();
   }
 
   function renderStepHeader() {
@@ -496,7 +554,7 @@ export default function App() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.heroCard}>
-          <View>
+          <View style={styles.heroTextWrap}>
             <Text style={styles.heroTitle}>Crew Feed</Text>
             <Text style={styles.heroText}>See what everyone is sipping today.</Text>
           </View>
@@ -523,11 +581,16 @@ export default function App() {
             </View>
 
             {post.imageUri ? (
-              <Image
-                source={{ uri: post.imageUri }}
-                style={styles.postImage}
-                resizeMode="cover"
-              />
+              <TouchableOpacity
+                activeOpacity={0.92}
+                onPress={() => setSelectedImageUri(post.imageUri)}
+              >
+                <Image
+                  source={{ uri: post.imageUri }}
+                  style={styles.postImage}
+                  resizeMode="cover"
+                />
+              </TouchableOpacity>
             ) : (
               <View style={styles.placeholderPortrait}>
                 <Text style={styles.photoText}>4:5 bev photo</Text>
@@ -539,23 +602,47 @@ export default function App() {
 
             <View style={styles.metaRow}>
               <Text style={styles.rating}>Rating: {post.rating}/10</Text>
-              {post.barcode ? <Text style={styles.barcodeSmall}>UPC saved</Text> : null}
             </View>
 
             {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
 
             <View style={styles.reactionRow}>
-              {reactionOptions.map((emoji) => (
+              {Array.from(
+                new Set([...reactionOptions, ...Object.keys(post.reactions || {})])
+              ).map((emoji) => (
                 <TouchableOpacity
                   key={emoji}
                   style={styles.reactionButton}
                   onPress={() => reactToPost(post.id, emoji)}
                 >
                   <Text style={styles.reactionText}>
-                    {emoji} {post.reactions[emoji] || 0}
+                    {emoji} {post.reactions?.[emoji] || 0}
                   </Text>
                 </TouchableOpacity>
               ))}
+            </View>
+
+            <View style={styles.customReactionRow}>
+              <TextInput
+                style={styles.emojiInput}
+                placeholder="any emoji"
+                placeholderTextColor={theme.muted}
+                value={customEmojiDrafts[post.id] || ""}
+                onChangeText={(text) =>
+                  setCustomEmojiDrafts({
+                    ...customEmojiDrafts,
+                    [post.id]: text,
+                  })
+                }
+                maxLength={8}
+              />
+
+              <TouchableOpacity
+                style={styles.emojiButton}
+                onPress={() => addCustomReaction(post.id)}
+              >
+                <Text style={styles.emojiButtonText}>React</Text>
+              </TouchableOpacity>
             </View>
 
             {post.comments.length > 0 ? (
@@ -893,6 +980,28 @@ export default function App() {
           ))}
         </View>
       ) : null}
+
+      <Modal
+        visible={!!selectedImageUri}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedImageUri(null)}
+      >
+        <Pressable
+          style={styles.imageModalBackdrop}
+          onPress={() => setSelectedImageUri(null)}
+        >
+          {selectedImageUri ? (
+            <Image
+              source={{ uri: selectedImageUri }}
+              style={styles.fullscreenImage}
+              resizeMode="contain"
+            />
+          ) : null}
+
+          <Text style={styles.modalHint}>tap anywhere to close</Text>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -974,6 +1083,11 @@ function createStyles(theme) {
       justifyContent: "space-between",
       borderWidth: 1,
       borderColor: theme.border,
+      gap: 12,
+    },
+    heroTextWrap: {
+      flex: 1,
+      paddingRight: 8,
     },
     heroTitle: {
       color: theme.text,
@@ -989,6 +1103,7 @@ function createStyles(theme) {
       paddingHorizontal: 18,
       paddingVertical: 11,
       borderRadius: 999,
+      flexShrink: 0,
     },
     heroButtonText: {
       color: "#0B0D0C",
@@ -1069,11 +1184,6 @@ function createStyles(theme) {
       color: theme.primary,
       fontWeight: "900",
     },
-    barcodeSmall: {
-      color: theme.muted,
-      fontSize: 12,
-      fontWeight: "800",
-    },
     caption: {
       color: theme.text,
       lineHeight: 20,
@@ -1098,6 +1208,35 @@ function createStyles(theme) {
       borderColor: theme.border,
     },
     reactionText: {
+      color: theme.text,
+      fontWeight: "900",
+    },
+    customReactionRow: {
+      flexDirection: "row",
+      gap: 8,
+      alignItems: "center",
+      marginBottom: 12,
+    },
+    emojiInput: {
+      flex: 1,
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: 999,
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderWidth: 1,
+      borderColor: theme.border,
+      fontSize: 16,
+    },
+    emojiButton: {
+      backgroundColor: theme.surface2,
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    emojiButtonText: {
       color: theme.text,
       fontWeight: "900",
     },
@@ -1140,6 +1279,23 @@ function createStyles(theme) {
     commentButtonText: {
       color: "#0B0D0C",
       fontWeight: "900",
+    },
+    imageModalBackdrop: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.92)",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 16,
+    },
+    fullscreenImage: {
+      width: "100%",
+      height: "82%",
+    },
+    modalHint: {
+      color: "#FFFFFF",
+      fontWeight: "800",
+      marginTop: 14,
+      opacity: 0.7,
     },
     stepWrap: {
       flexDirection: "row",

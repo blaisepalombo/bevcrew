@@ -29,6 +29,7 @@ import { supabase } from "./lib/supabase";
 
 const DEFAULT_REACTION = "👍";
 const QUICK_REACTIONS = ["🔥", "💯", "😮", "🤢"];
+const RATINGS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
 
 const palettes = {
   dark: {
@@ -71,21 +72,14 @@ function formatDate(dateString) {
   const date = new Date(dateString);
   const today = new Date();
 
-  if (date.toDateString() === today.toDateString()) {
-    return "Today";
-  }
+  if (date.toDateString() === today.toDateString()) return "Today";
 
   const yesterday = new Date();
   yesterday.setDate(today.getDate() - 1);
 
-  if (date.toDateString() === yesterday.toDateString()) {
-    return "Yesterday";
-  }
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
 
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function getVisibleReactionEntries(reactions) {
@@ -155,7 +149,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
   const [commentDrafts, setCommentDrafts] = useState({});
-
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -180,7 +173,6 @@ export default function App() {
   const streak = myPosts.length;
   const steps = ["Photo", "Scan", "Post"];
   const categories = ["Energy", "Soda", "Coffee", "Water", "Other"];
-  const ratings = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
 
   useEffect(() => {
     loadPosts();
@@ -220,7 +212,6 @@ export default function App() {
     }
 
     const postIds = postRows.map((post) => post.id);
-
     let reactionRows = [];
     let commentRows = [];
 
@@ -285,9 +276,7 @@ export default function App() {
       .toString(36)
       .slice(2)}.${fileExt}`;
 
-    const base64 = await FileSystem.readAsStringAsync(uri, {
-      encoding: "base64",
-    });
+    const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
 
     const { error: uploadError } = await supabase.storage
       .from("bev-photos")
@@ -296,12 +285,9 @@ export default function App() {
         upsert: false,
       });
 
-    if (uploadError) {
-      throw uploadError;
-    }
+    if (uploadError) throw uploadError;
 
     const { data } = supabase.storage.from("bev-photos").getPublicUrl(fileName);
-
     return data.publicUrl;
   }
 
@@ -349,9 +335,7 @@ export default function App() {
       quality: 0.85,
     });
 
-    if (!result.canceled) {
-      setImageUri(result.assets[0].uri);
-    }
+    if (!result.canceled) setImageUri(result.assets[0].uri);
   }
 
   async function startScanner() {
@@ -377,7 +361,6 @@ export default function App() {
     setScannerOpen(false);
     setBarcode(scannedCode);
     setLookupStatus("Looking up drink...");
-
     await lookupBarcode(scannedCode);
   }
 
@@ -386,7 +369,6 @@ export default function App() {
       const response = await fetch(
         `https://world.openfoodfacts.org/api/v2/product/${code}.json`
       );
-
       const data = await response.json();
 
       if (data.status === 1 && data.product) {
@@ -418,9 +400,7 @@ export default function App() {
       return;
     }
 
-    if (postStep < steps.length - 1) {
-      setPostStep(postStep + 1);
-    }
+    if (postStep < steps.length - 1) setPostStep(postStep + 1);
   }
 
   async function postBev() {
@@ -445,9 +425,7 @@ export default function App() {
         image_url: uploadedImageUrl,
       });
 
-      if (error) {
-        throw error;
-      }
+      if (error) throw error;
 
       resetPostFlow();
       setActiveTab("Feed");
@@ -461,7 +439,6 @@ export default function App() {
 
   function reactToPost(postId, emoji) {
     const cleanEmoji = emoji.trim();
-
     if (!cleanEmoji) return;
 
     longPressUsedRef.current = false;
@@ -485,11 +462,7 @@ export default function App() {
 
     supabase
       .from("reactions")
-      .insert({
-        post_id: postId,
-        emoji: cleanEmoji,
-        user_name: "Blaise",
-      })
+      .insert({ post_id: postId, emoji: cleanEmoji, user_name: "Blaise" })
       .then(({ error }) => {
         if (error) {
           Alert.alert("Reaction failed", error.message);
@@ -532,38 +505,25 @@ export default function App() {
 
   function addCustomReaction() {
     const cleanEmoji = customEmojiInput.trim();
-
     if (!cleanEmoji || !customEmojiPostId) return;
-
     reactToPost(customEmojiPostId, cleanEmoji);
   }
 
   async function addComment(postId) {
     const text = (commentDrafts[postId] || "").trim();
-
     if (!text) return;
 
-    const tempComment = {
-      id: `temp-${Date.now()}`,
-      user: "Blaise",
-      text,
-    };
+    const tempComment = { id: `temp-${Date.now()}`, user: "Blaise", text };
 
     setPosts((currentPosts) =>
       currentPosts.map((post) =>
         post.id === postId
-          ? {
-              ...post,
-              comments: [...(post.comments || []), tempComment],
-            }
+          ? { ...post, comments: [...(post.comments || []), tempComment] }
           : post
       )
     );
 
-    setCommentDrafts((drafts) => ({
-      ...drafts,
-      [postId]: "",
-    }));
+    setCommentDrafts((drafts) => ({ ...drafts, [postId]: "" }));
 
     const { error } = await supabase.from("comments").insert({
       post_id: postId,
@@ -787,7 +747,9 @@ export default function App() {
         <View style={styles.cameraCaptureScreen}>
           <View style={styles.cameraCaptureHeader}>
             <Text style={styles.cameraCaptureTitle}>Line up your bev</Text>
-            <Text style={styles.cameraCaptureText}>This is the same 4:5 shape used in the feed.</Text>
+            <Text style={styles.cameraCaptureText}>
+              This is the same 4:5 shape used in the feed.
+            </Text>
           </View>
 
           <View style={styles.cameraFrame}>
@@ -829,9 +791,7 @@ export default function App() {
             <Text style={styles.scannerText}>
               Center the barcode in the box. This should fill in the drink faster.
             </Text>
-
             <View style={styles.scanBox} />
-
             <TouchableOpacity
               style={styles.scannerClose}
               onPress={() => setScannerOpen(false)}
@@ -868,11 +828,7 @@ export default function App() {
 
               <View style={styles.photoCompactCard}>
                 {imageUri ? (
-                  <Image
-                    source={{ uri: imageUri }}
-                    style={styles.photoThumbnail}
-                    resizeMode="cover"
-                  />
+                  <Image source={{ uri: imageUri }} style={styles.photoThumbnail} />
                 ) : (
                   <View style={styles.photoThumbnailEmpty}>
                     <Text style={styles.photoThumbnailIcon}>＋</Text>
@@ -960,16 +916,10 @@ export default function App() {
           {postStep === 2 && (
             <View style={styles.wizardCard}>
               <Text style={styles.cardTitle}>Rate and post</Text>
-              <Text style={styles.cardHint}>
-                One tap rating, optional caption, done.
-              </Text>
+              <Text style={styles.cardHint}>One tap rating, optional caption, done.</Text>
 
               {imageUri ? (
-                <Image
-                  source={{ uri: imageUri }}
-                  style={styles.reviewImage}
-                  resizeMode="cover"
-                />
+                <Image source={{ uri: imageUri }} style={styles.reviewImage} />
               ) : null}
 
               <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
@@ -977,16 +927,13 @@ export default function App() {
 
               <View style={styles.ratingHeaderRow}>
                 <Text style={styles.inputLabel}>Rating</Text>
-                <Text style={styles.ratingSelected}>{rating ? `${rating}/10` : "pick one"}</Text>
+                <Text style={styles.ratingSelected}>
+                  {rating ? `${rating}/10` : "pick one"}
+                </Text>
               </View>
 
-              <ScrollView
-                horizontal
-                style={styles.ratingScroller}
-                contentContainerStyle={styles.ratingScrollContent}
-                showsHorizontalScrollIndicator={false}
-              >
-                {ratings.map((num) => (
+              <View style={styles.ratingGrid}>
+                {RATINGS.map((num) => (
                   <TouchableOpacity
                     key={num}
                     style={[
@@ -1005,7 +952,12 @@ export default function App() {
                     </Text>
                   </TouchableOpacity>
                 ))}
-              </ScrollView>
+              </View>
+
+              <View style={styles.ratingGuideRow}>
+                <Text style={styles.ratingGuideText}>1 rough</Text>
+                <Text style={styles.ratingGuideText}>10 elite</Text>
+              </View>
 
               <Text style={styles.inputLabel}>Caption</Text>
               <TextInput
@@ -1034,11 +986,7 @@ export default function App() {
         {myPosts.map((post) => (
           <View key={post.id} style={styles.historyItem}>
             {post.imageUri ? (
-              <Image
-                source={{ uri: post.imageUri }}
-                style={styles.historyImage}
-                resizeMode="cover"
-              />
+              <Image source={{ uri: post.imageUri }} style={styles.historyImage} />
             ) : (
               <View style={styles.historyPlaceholder}>
                 <Text style={styles.photoText}>no photo</Text>
@@ -1899,14 +1847,6 @@ function createStyles(theme) {
       fontWeight: "900",
       fontSize: 12,
     },
-    secondaryFull: {
-      backgroundColor: theme.surface2,
-      borderColor: theme.border,
-      borderWidth: 1,
-      padding: 15,
-      borderRadius: 18,
-      alignItems: "center",
-    },
     scanButton: {
       backgroundColor: theme.primary,
       padding: 16,
@@ -1994,19 +1934,17 @@ function createStyles(theme) {
       fontWeight: "900",
       marginTop: 6,
     },
-    ratingScroller: {
-      marginBottom: 12,
-      marginHorizontal: -2,
-    },
-    ratingScrollContent: {
-      gap: 8,
-      paddingHorizontal: 2,
-      paddingRight: 12,
+    ratingGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      justifyContent: "space-between",
+      rowGap: 8,
+      marginBottom: 8,
     },
     ratingBubble: {
-      width: 42,
-      height: 42,
-      borderRadius: 21,
+      width: "18%",
+      height: 38,
+      borderRadius: 19,
       backgroundColor: theme.surface2,
       borderColor: theme.border,
       borderWidth: 1,
@@ -2023,6 +1961,16 @@ function createStyles(theme) {
     },
     ratingBubbleTextActive: {
       color: "#0B0D0C",
+    },
+    ratingGuideRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      marginBottom: 12,
+    },
+    ratingGuideText: {
+      color: theme.muted,
+      fontSize: 12,
+      fontWeight: "800",
     },
     captionInput: {
       minHeight: 105,

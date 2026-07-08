@@ -150,6 +150,7 @@ export default function App() {
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const longPressUsedRef = useRef(false);
+  const photoCameraRef = useRef(null);
 
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
@@ -167,6 +168,7 @@ export default function App() {
   const [rating, setRating] = useState("");
   const [caption, setCaption] = useState("");
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [customCameraOpen, setCustomCameraOpen] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [lookupStatus, setLookupStatus] = useState("");
 
@@ -178,6 +180,7 @@ export default function App() {
   const streak = myPosts.length;
   const steps = ["Photo", "Scan", "Post"];
   const categories = ["Energy", "Soda", "Coffee", "Water", "Other"];
+  const ratings = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
 
   useEffect(() => {
     loadPosts();
@@ -197,6 +200,7 @@ export default function App() {
     setRating("");
     setCaption("");
     setScannerOpen(false);
+    setCustomCameraOpen(false);
     setScanned(false);
     setLookupStatus("");
   }
@@ -302,21 +306,31 @@ export default function App() {
   }
 
   async function takePhoto() {
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (!cameraPermission?.granted) {
+      const permission = await requestCameraPermission();
 
-    if (!permission.granted) {
-      Alert.alert("Permission needed", "Camera access is needed to take a bev photo.");
-      return;
+      if (!permission.granted) {
+        Alert.alert("Permission needed", "Camera access is needed to take a bev photo.");
+        return;
+      }
     }
 
-    const result = await ImagePicker.launchCameraAsync({
-      allowsEditing: true,
-      aspect: [4, 5],
-      quality: 0.85,
-    });
+    setCustomCameraOpen(true);
+  }
 
-    if (!result.canceled) {
-      setImageUri(result.assets[0].uri);
+  async function capturePhoto() {
+    try {
+      const photo = await photoCameraRef.current?.takePictureAsync({
+        quality: 0.85,
+        skipProcessing: false,
+      });
+
+      if (photo?.uri) {
+        setImageUri(photo.uri);
+        setCustomCameraOpen(false);
+      }
+    } catch (error) {
+      Alert.alert("Camera error", "Could not take the photo. Try again.");
     }
   }
 
@@ -700,7 +714,13 @@ export default function App() {
 
               {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
 
-              <View style={styles.reactionLine}>
+              <ScrollView
+                horizontal
+                style={styles.reactionScroll}
+                contentContainerStyle={styles.reactionScrollContent}
+                showsHorizontalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+              >
                 <TouchableOpacity
                   style={styles.defaultReactionButton}
                   onPress={() => handleDefaultReactionPress(post.id)}
@@ -723,7 +743,7 @@ export default function App() {
                     </Text>
                   </TouchableOpacity>
                 ))}
-              </View>
+              </ScrollView>
 
               {post.comments.length > 0 ? (
                 <View style={styles.commentsBox}>
@@ -762,6 +782,36 @@ export default function App() {
   }
 
   function renderPostFlow() {
+    if (customCameraOpen) {
+      return (
+        <View style={styles.cameraCaptureScreen}>
+          <View style={styles.cameraCaptureHeader}>
+            <Text style={styles.cameraCaptureTitle}>Line up your bev</Text>
+            <Text style={styles.cameraCaptureText}>This is the same 4:5 shape used in the feed.</Text>
+          </View>
+
+          <View style={styles.cameraFrame}>
+            <CameraView ref={photoCameraRef} style={styles.cameraPreview} facing="back" />
+          </View>
+
+          <View style={styles.cameraControls}>
+            <TouchableOpacity
+              style={styles.cameraCancelButton}
+              onPress={() => setCustomCameraOpen(false)}
+            >
+              <Text style={styles.cameraCancelText}>Cancel</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.captureButtonOuter} onPress={capturePhoto}>
+              <View style={styles.captureButtonInner} />
+            </TouchableOpacity>
+
+            <View style={styles.cameraControlSpacer} />
+          </View>
+        </View>
+      );
+    }
+
     if (scannerOpen) {
       return (
         <View style={styles.scannerScreen}>
@@ -813,27 +863,43 @@ export default function App() {
             <View style={styles.wizardCard}>
               <Text style={styles.cardTitle}>Add the photo</Text>
               <Text style={styles.cardHint}>
-                Use a 4:5 portrait shot. That is the default feed shape.
+                Open the camera in a 4:5 frame, snap it, and move on.
               </Text>
 
-              <TouchableOpacity style={styles.photoPicker} onPress={takePhoto}>
+              <View style={styles.photoCompactCard}>
                 {imageUri ? (
                   <Image
                     source={{ uri: imageUri }}
-                    style={styles.previewImage}
+                    style={styles.photoThumbnail}
                     resizeMode="cover"
                   />
                 ) : (
-                  <View style={styles.photoEmpty}>
-                    <Text style={styles.photoIcon}>＋</Text>
-                    <Text style={styles.photoText}>Tap to take photo</Text>
+                  <View style={styles.photoThumbnailEmpty}>
+                    <Text style={styles.photoThumbnailIcon}>＋</Text>
                   </View>
                 )}
-              </TouchableOpacity>
 
-              <TouchableOpacity style={styles.secondaryFull} onPress={pickImage}>
-                <Text style={styles.secondaryButtonText}>Choose from library</Text>
-              </TouchableOpacity>
+                <View style={styles.photoActionArea}>
+                  <Text style={styles.photoStatus}>
+                    {imageUri ? "Photo ready" : "No photo yet"}
+                  </Text>
+                  <Text style={styles.photoSubtext}>
+                    {imageUri ? "Retake it or keep going." : "Use the same shape as the feed."}
+                  </Text>
+
+                  <View style={styles.photoButtonRow}>
+                    <TouchableOpacity style={styles.compactPrimary} onPress={takePhoto}>
+                      <Text style={styles.compactPrimaryText}>
+                        {imageUri ? "Retake" : "Take photo"}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.compactSecondary} onPress={pickImage}>
+                      <Text style={styles.compactSecondaryText}>Library</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
             </View>
           )}
 
@@ -909,28 +975,37 @@ export default function App() {
               <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
               <Text style={styles.reviewFlavor}>{flavor || "Flavor"}</Text>
 
-              <Text style={styles.inputLabel}>Rating</Text>
-              <View style={styles.ratingRow}>
-                {["6", "7", "8", "9", "10"].map((num) => (
+              <View style={styles.ratingHeaderRow}>
+                <Text style={styles.inputLabel}>Rating</Text>
+                <Text style={styles.ratingSelected}>{rating ? `${rating}/10` : "pick one"}</Text>
+              </View>
+
+              <ScrollView
+                horizontal
+                style={styles.ratingScroller}
+                contentContainerStyle={styles.ratingScrollContent}
+                showsHorizontalScrollIndicator={false}
+              >
+                {ratings.map((num) => (
                   <TouchableOpacity
                     key={num}
                     style={[
-                      styles.ratingChip,
-                      rating === num && styles.ratingChipActive,
+                      styles.ratingBubble,
+                      rating === num && styles.ratingBubbleActive,
                     ]}
                     onPress={() => setRating(num)}
                   >
                     <Text
                       style={[
-                        styles.ratingChipText,
-                        rating === num && styles.ratingChipTextActive,
+                        styles.ratingBubbleText,
+                        rating === num && styles.ratingBubbleTextActive,
                       ]}
                     >
                       {num}
                     </Text>
                   </TouchableOpacity>
                 ))}
-              </View>
+              </ScrollView>
 
               <Text style={styles.inputLabel}>Caption</Text>
               <TextInput
@@ -1111,7 +1186,7 @@ export default function App() {
       <SafeAreaView style={styles.container}>
         <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
 
-        {!scannerOpen ? (
+        {!scannerOpen && !customCameraOpen ? (
           <View style={styles.header}>
             <View>
               <Text style={styles.logo}>bevcrew</Text>
@@ -1131,7 +1206,7 @@ export default function App() {
         {activeTab === "History" && renderHistory()}
         {activeTab === "Profile" && renderProfile()}
 
-        {!scannerOpen ? (
+        {!scannerOpen && !customCameraOpen ? (
           <View style={styles.tabs}>
             {["Feed", "Post", "History", "Profile"].map((tab) => (
               <TouchableOpacity
@@ -1360,12 +1435,15 @@ function createStyles(theme) {
       overflow: "hidden",
       marginBottom: 12,
     },
-    reactionLine: {
-      flexDirection: "row",
-      flexWrap: "wrap",
+    reactionScroll: {
+      marginBottom: 12,
+      marginHorizontal: -2,
+    },
+    reactionScrollContent: {
       alignItems: "center",
       gap: 8,
-      marginBottom: 12,
+      paddingHorizontal: 2,
+      paddingRight: 12,
     },
     defaultReactionButton: {
       alignSelf: "flex-start",
@@ -1612,6 +1690,76 @@ function createStyles(theme) {
       fontSize: 16,
       fontWeight: "900",
     },
+    cameraCaptureScreen: {
+      flex: 1,
+      backgroundColor: "#000000",
+      padding: 16,
+      justifyContent: "space-between",
+    },
+    cameraCaptureHeader: {
+      paddingTop: 18,
+      alignItems: "center",
+    },
+    cameraCaptureTitle: {
+      color: "#FFFFFF",
+      fontSize: 24,
+      fontWeight: "900",
+    },
+    cameraCaptureText: {
+      color: "rgba(255,255,255,0.72)",
+      marginTop: 6,
+      fontWeight: "700",
+      textAlign: "center",
+    },
+    cameraFrame: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      borderRadius: 28,
+      overflow: "hidden",
+      backgroundColor: "#111111",
+      borderWidth: 2,
+      borderColor: theme.primary,
+    },
+    cameraPreview: {
+      flex: 1,
+    },
+    cameraControls: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingBottom: 26,
+      paddingHorizontal: 4,
+    },
+    cameraCancelButton: {
+      minWidth: 86,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      borderRadius: 999,
+      backgroundColor: "rgba(255,255,255,0.14)",
+      alignItems: "center",
+    },
+    cameraCancelText: {
+      color: "#FFFFFF",
+      fontWeight: "900",
+    },
+    cameraControlSpacer: {
+      width: 86,
+    },
+    captureButtonOuter: {
+      width: 74,
+      height: 74,
+      borderRadius: 37,
+      borderWidth: 4,
+      borderColor: "#FFFFFF",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    captureButtonInner: {
+      width: 56,
+      height: 56,
+      borderRadius: 28,
+      backgroundColor: "#FFFFFF",
+    },
     scannerScreen: {
       flex: 1,
       backgroundColor: "#000000",
@@ -1678,30 +1826,78 @@ function createStyles(theme) {
       marginTop: 6,
       marginBottom: 16,
     },
-    photoPicker: {
-      width: "100%",
-      aspectRatio: 4 / 5,
+    photoCompactCard: {
       backgroundColor: theme.surface2,
-      borderRadius: 28,
-      overflow: "hidden",
+      borderRadius: 24,
+      padding: 12,
       borderWidth: 1,
       borderColor: theme.border,
-      marginBottom: 12,
+      flexDirection: "row",
+      gap: 12,
+      alignItems: "center",
     },
-    previewImage: {
-      width: "100%",
-      height: "100%",
+    photoThumbnail: {
+      width: 82,
+      aspectRatio: 4 / 5,
+      borderRadius: 18,
+      backgroundColor: theme.surface,
     },
-    photoEmpty: {
-      flex: 1,
+    photoThumbnailEmpty: {
+      width: 82,
+      aspectRatio: 4 / 5,
+      borderRadius: 18,
+      backgroundColor: theme.surface,
       alignItems: "center",
       justifyContent: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
     },
-    photoIcon: {
+    photoThumbnailIcon: {
       color: theme.primary,
-      fontSize: 42,
+      fontSize: 34,
       fontWeight: "300",
-      marginBottom: 4,
+    },
+    photoActionArea: {
+      flex: 1,
+    },
+    photoStatus: {
+      color: theme.text,
+      fontSize: 17,
+      fontWeight: "900",
+    },
+    photoSubtext: {
+      color: theme.muted,
+      marginTop: 3,
+      marginBottom: 12,
+      fontWeight: "700",
+    },
+    photoButtonRow: {
+      flexDirection: "row",
+      gap: 8,
+    },
+    compactPrimary: {
+      backgroundColor: theme.primary,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      borderRadius: 999,
+    },
+    compactPrimaryText: {
+      color: "#0B0D0C",
+      fontWeight: "900",
+      fontSize: 12,
+    },
+    compactSecondary: {
+      backgroundColor: theme.surface,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    compactSecondaryText: {
+      color: theme.text,
+      fontWeight: "900",
+      fontSize: 12,
     },
     secondaryFull: {
       backgroundColor: theme.surface2,
@@ -1787,29 +1983,45 @@ function createStyles(theme) {
       fontWeight: "800",
       marginBottom: 14,
     },
-    ratingRow: {
+    ratingHeaderRow: {
       flexDirection: "row",
-      gap: 8,
-      marginBottom: 12,
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 8,
     },
-    ratingChip: {
-      flex: 1,
+    ratingSelected: {
+      color: theme.primary,
+      fontWeight: "900",
+      marginTop: 6,
+    },
+    ratingScroller: {
+      marginBottom: 12,
+      marginHorizontal: -2,
+    },
+    ratingScrollContent: {
+      gap: 8,
+      paddingHorizontal: 2,
+      paddingRight: 12,
+    },
+    ratingBubble: {
+      width: 42,
+      height: 42,
+      borderRadius: 21,
       backgroundColor: theme.surface2,
       borderColor: theme.border,
       borderWidth: 1,
-      paddingVertical: 13,
-      borderRadius: 16,
       alignItems: "center",
+      justifyContent: "center",
     },
-    ratingChipActive: {
+    ratingBubbleActive: {
       backgroundColor: theme.primary,
       borderColor: theme.primary,
     },
-    ratingChipText: {
+    ratingBubbleText: {
       color: theme.muted,
       fontWeight: "900",
     },
-    ratingChipTextActive: {
+    ratingBubbleTextActive: {
       color: "#0B0D0C",
     },
     captionInput: {

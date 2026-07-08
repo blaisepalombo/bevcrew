@@ -96,6 +96,12 @@ function getTouchDistance(event) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
+function getVisibleReactionEntries(reactions) {
+  return Object.entries(reactions || {})
+    .filter(([emoji, count]) => emoji !== DEFAULT_REACTION && Number(count) > 0)
+    .sort((first, second) => Number(second[1]) - Number(first[1]));
+}
+
 export default function App() {
   const [themeMode, setThemeMode] = useState("dark");
   const theme = palettes[themeMode];
@@ -103,6 +109,7 @@ export default function App() {
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const longPressUsedRef = useRef(false);
+  const pinchStartRef = useRef(null);
 
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
@@ -126,7 +133,6 @@ export default function App() {
   const [reactionPickerPostId, setReactionPickerPostId] = useState(null);
   const [customEmojiPostId, setCustomEmojiPostId] = useState(null);
   const [customEmojiInput, setCustomEmojiInput] = useState("");
-  const [pinchStart, setPinchStart] = useState(null);
   const [pinchScale, setPinchScale] = useState(null);
 
   const myPosts = posts.filter((post) => post.user === "Blaise");
@@ -405,6 +411,7 @@ export default function App() {
 
     if (!cleanEmoji) return;
 
+    longPressUsedRef.current = false;
     setReactionPickerPostId(null);
     setCustomEmojiPostId(null);
     setCustomEmojiInput("");
@@ -452,10 +459,22 @@ export default function App() {
     setReactionPickerPostId(postId);
   }
 
+  function closeReactionPicker() {
+    longPressUsedRef.current = false;
+    setReactionPickerPostId(null);
+  }
+
   function openCustomEmojiPicker(postId) {
+    longPressUsedRef.current = false;
     setReactionPickerPostId(null);
     setCustomEmojiInput("");
     setCustomEmojiPostId(postId);
+  }
+
+  function closeCustomEmojiPicker() {
+    longPressUsedRef.current = false;
+    setCustomEmojiPostId(null);
+    setCustomEmojiInput("");
   }
 
   function addCustomReaction() {
@@ -505,31 +524,42 @@ export default function App() {
     }
   }
 
-  function shouldSetImageResponder(event) {
-    return (event.nativeEvent?.touches || []).length >= 2;
-  }
-
-  function startPinch(postId, event) {
+  function startImageTouch(postId, event) {
     const distance = getTouchDistance(event);
 
     if (!distance) return;
 
-    setPinchStart({ postId, distance });
+    pinchStartRef.current = { postId, distance };
     setPinchScale({ postId, scale: 1 });
   }
 
-  function movePinch(postId, event) {
+  function moveImageTouch(postId, event) {
     const distance = getTouchDistance(event);
 
-    if (!distance || !pinchStart || pinchStart.postId !== postId) return;
+    if (!distance) return;
 
-    const nextScale = Math.min(Math.max(distance / pinchStart.distance, 1), 3);
+    const start = pinchStartRef.current;
+
+    if (!start || start.postId !== postId) {
+      pinchStartRef.current = { postId, distance };
+      setPinchScale({ postId, scale: 1 });
+      return;
+    }
+
+    const rawScale = distance / start.distance;
+    const dampenedScale = 1 + (rawScale - 1) * 0.32;
+    const nextScale = Math.min(Math.max(dampenedScale, 1), 1.9);
+
     setPinchScale({ postId, scale: nextScale });
   }
 
-  function endPinch() {
-    setPinchStart(null);
-    setPinchScale(null);
+  function endImageTouch(event) {
+    const touches = event.nativeEvent?.touches || [];
+
+    if (touches.length < 2) {
+      pinchStartRef.current = null;
+      setPinchScale(null);
+    }
   }
 
   function renderStepHeader() {
@@ -639,6 +669,7 @@ export default function App() {
         {posts.map((post) => {
           const currentScale =
             pinchScale?.postId === post.id ? pinchScale.scale : 1;
+          const visibleReactions = getVisibleReactionEntries(post.reactions);
 
           return (
             <View key={post.id} style={styles.feedCard}>
@@ -656,12 +687,10 @@ export default function App() {
               {post.imageUri ? (
                 <View
                   style={styles.postImageFrame}
-                  onStartShouldSetResponder={shouldSetImageResponder}
-                  onMoveShouldSetResponder={shouldSetImageResponder}
-                  onResponderStart={(event) => startPinch(post.id, event)}
-                  onResponderMove={(event) => movePinch(post.id, event)}
-                  onResponderRelease={endPinch}
-                  onResponderTerminate={endPinch}
+                  onTouchStart={(event) => startImageTouch(post.id, event)}
+                  onTouchMove={(event) => moveImageTouch(post.id, event)}
+                  onTouchEnd={endImageTouch}
+                  onTouchCancel={endImageTouch}
                 >
                   <Image
                     source={{ uri: post.imageUri }}
@@ -687,16 +716,30 @@ export default function App() {
 
               {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
 
-              <TouchableOpacity
-                style={styles.defaultReactionButton}
-                onPress={() => handleDefaultReactionPress(post.id)}
-                onLongPress={() => openReactionPicker(post.id)}
-                delayLongPress={260}
-              >
-                <Text style={styles.defaultReactionText}>
-                  {DEFAULT_REACTION} {post.reactions?.[DEFAULT_REACTION] || 0}
-                </Text>
-              </TouchableOpacity>
+              <View style={styles.reactionLine}>
+                <TouchableOpacity
+                  style={styles.defaultReactionButton}
+                  onPress={() => handleDefaultReactionPress(post.id)}
+                  onLongPress={() => openReactionPicker(post.id)}
+                  delayLongPress={300}
+                >
+                  <Text style={styles.defaultReactionText}>
+                    {DEFAULT_REACTION} {post.reactions?.[DEFAULT_REACTION] || 0}
+                  </Text>
+                </TouchableOpacity>
+
+                {visibleReactions.map(([emoji, count]) => (
+                  <TouchableOpacity
+                    key={emoji}
+                    style={styles.reactionChip}
+                    onPress={() => reactToPost(post.id, emoji)}
+                  >
+                    <Text style={styles.reactionChipText}>
+                      {emoji} {count}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
 
               {post.comments.length > 0 ? (
                 <View style={styles.commentsBox}>
@@ -996,13 +1039,13 @@ export default function App() {
         visible={!!reactionPickerPostId}
         transparent
         animationType="fade"
-        onRequestClose={() => setReactionPickerPostId(null)}
+        onRequestClose={closeReactionPicker}
       >
         <View style={styles.pickerBackdrop}>
           <TouchableOpacity
             style={styles.pickerBackdropPressTarget}
             activeOpacity={1}
-            onPress={() => setReactionPickerPostId(null)}
+            onPress={closeReactionPicker}
           />
 
           <View style={styles.reactionPicker}>
@@ -1034,13 +1077,13 @@ export default function App() {
         visible={!!customEmojiPostId}
         transparent
         animationType="fade"
-        onRequestClose={() => setCustomEmojiPostId(null)}
+        onRequestClose={closeCustomEmojiPicker}
       >
         <View style={styles.pickerBackdrop}>
           <TouchableOpacity
             style={styles.pickerBackdropPressTarget}
             activeOpacity={1}
-            onPress={() => setCustomEmojiPostId(null)}
+            onPress={closeCustomEmojiPicker}
           />
 
           <KeyboardAvoidingView
@@ -1061,7 +1104,7 @@ export default function App() {
             <View style={styles.customEmojiActions}>
               <TouchableOpacity
                 style={styles.modalCancelButton}
-                onPress={() => setCustomEmojiPostId(null)}
+                onPress={closeCustomEmojiPicker}
               >
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
@@ -1327,6 +1370,13 @@ function createStyles(theme) {
       overflow: "hidden",
       marginBottom: 12,
     },
+    reactionLine: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 12,
+    },
     defaultReactionButton: {
       alignSelf: "flex-start",
       backgroundColor: theme.surface2,
@@ -1335,12 +1385,24 @@ function createStyles(theme) {
       borderRadius: 999,
       borderWidth: 1,
       borderColor: theme.border,
-      marginBottom: 12,
     },
     defaultReactionText: {
       color: theme.text,
       fontWeight: "900",
       fontSize: 15,
+    },
+    reactionChip: {
+      backgroundColor: theme.surface2,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    reactionChipText: {
+      color: theme.text,
+      fontWeight: "900",
+      fontSize: 14,
     },
     commentsBox: {
       backgroundColor: theme.surface2,

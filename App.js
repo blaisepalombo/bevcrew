@@ -82,6 +82,10 @@ function formatDate(dateString) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatRating(value) {
+  return value && value !== "-" ? `${value}/10` : "Not rated";
+}
+
 function getVisibleReactionEntries(reactions) {
   return Object.entries(reactions || {})
     .filter(([emoji, count]) => emoji !== DEFAULT_REACTION && Number(count) > 0)
@@ -145,12 +149,14 @@ export default function App() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const longPressUsedRef = useRef(false);
   const photoCameraRef = useRef(null);
+  const toastTimerRef = useRef(null);
 
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
   const [commentDrafts, setCommentDrafts] = useState({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [toastMessage, setToastMessage] = useState("");
 
   const [postStep, setPostStep] = useState(0);
   const [imageUri, setImageUri] = useState(null);
@@ -176,10 +182,30 @@ export default function App() {
 
   useEffect(() => {
     loadPosts();
+
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
   }, []);
 
   function toggleTheme() {
     setThemeMode(themeMode === "dark" ? "light" : "dark");
+  }
+
+  function showToast(message) {
+    setToastMessage(message);
+
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+
+    toastTimerRef.current = setTimeout(() => {
+      setToastMessage("");
+    }, 2200);
+  }
+
+  function isStepReady(step = postStep) {
+    if (step === 0) return !!imageUri;
+    if (step === 1) return !!brand.trim() && !!flavor.trim();
+    return !!imageUri && !!brand.trim() && !!flavor.trim() && !!rating.trim();
   }
 
   function resetPostFlow() {
@@ -360,7 +386,7 @@ export default function App() {
     setScanned(true);
     setScannerOpen(false);
     setBarcode(scannedCode);
-    setLookupStatus("Looking up drink...");
+    setLookupStatus("Looking it up...");
     await lookupBarcode(scannedCode);
   }
 
@@ -380,32 +406,24 @@ export default function App() {
 
         if (foundBrand) setBrand(foundBrand);
         if (foundName) setFlavor(foundName);
-        setLookupStatus("Found it. Check the details before posting.");
+        setLookupStatus("Found it. Check the details.");
       } else {
-        setLookupStatus("Barcode saved, but no product match. Add it manually.");
+        setLookupStatus("No match. Type it manually.");
       }
     } catch (error) {
-      setLookupStatus("Barcode saved, but lookup failed. Add it manually.");
+      setLookupStatus("Lookup failed. Type it manually.");
     }
   }
 
   function goNext() {
-    if (postStep === 0 && !imageUri) {
-      Alert.alert("Add a photo", "Take or choose a 4:5 portrait photo first.");
-      return;
-    }
-
-    if (postStep === 1 && (!brand.trim() || !flavor.trim())) {
-      Alert.alert("Missing info", "Scan the barcode or add the brand and flavor.");
-      return;
-    }
+    if (!isStepReady()) return;
 
     if (postStep < steps.length - 1) setPostStep(postStep + 1);
   }
 
   async function postBev() {
-    if (!imageUri || !brand.trim() || !flavor.trim()) {
-      Alert.alert("Missing info", "Add a photo, brand, and flavor first.");
+    if (!isStepReady(2)) {
+      Alert.alert("Missing info", "Add the photo, drink details, and rating first.");
       return;
     }
 
@@ -419,7 +437,7 @@ export default function App() {
         brand: brand.trim(),
         flavor: flavor.trim(),
         category,
-        rating: rating.trim() || "-",
+        rating: rating.trim(),
         caption: caption.trim(),
         barcode: barcode || null,
         image_url: uploadedImageUrl,
@@ -430,6 +448,7 @@ export default function App() {
       resetPostFlow();
       setActiveTab("Feed");
       await loadPosts();
+      showToast("Posted to crew");
     } catch (error) {
       Alert.alert("Save failed", error.message || "Could not save your bev.");
     }
@@ -572,6 +591,8 @@ export default function App() {
   }
 
   function renderPostButtons() {
+    const primaryDisabled = saving || !isStepReady();
+
     return (
       <View style={styles.wizardButtons}>
         {postStep > 0 ? (
@@ -593,16 +614,32 @@ export default function App() {
         )}
 
         {postStep < steps.length - 1 ? (
-          <TouchableOpacity style={styles.primaryButton} onPress={goNext}>
-            <Text style={styles.primaryButtonText}>Next</Text>
+          <TouchableOpacity
+            style={[styles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
+            onPress={goNext}
+            disabled={primaryDisabled}
+          >
+            <Text
+              style={[
+                styles.primaryButtonText,
+                primaryDisabled && styles.primaryButtonTextDisabled,
+              ]}
+            >
+              Next
+            </Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
-            style={styles.primaryButton}
+            style={[styles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
             onPress={postBev}
-            disabled={saving}
+            disabled={primaryDisabled}
           >
-            <Text style={styles.primaryButtonText}>
+            <Text
+              style={[
+                styles.primaryButtonText,
+                primaryDisabled && styles.primaryButtonTextDisabled,
+              ]}
+            >
               {saving ? "Posting..." : "Post Bev"}
             </Text>
           </TouchableOpacity>
@@ -630,7 +667,7 @@ export default function App() {
         <View style={styles.heroCard}>
           <View style={styles.heroTextWrap}>
             <Text style={styles.heroTitle}>Crew Feed</Text>
-            <Text style={styles.heroText}>See what everyone is sipping today.</Text>
+            <Text style={styles.heroText}>Today’s drinks from the crew.</Text>
           </View>
 
           <TouchableOpacity
@@ -669,7 +706,7 @@ export default function App() {
               <Text style={styles.flavorName}>{post.flavor}</Text>
 
               <View style={styles.metaRow}>
-                <Text style={styles.rating}>Rating: {post.rating}/10</Text>
+                <Text style={styles.rating}>Rating: {formatRating(post.rating)}</Text>
               </View>
 
               {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
@@ -719,7 +756,7 @@ export default function App() {
               <View style={styles.commentRow}>
                 <TextInput
                   style={styles.commentInput}
-                  placeholder="leave a comment"
+                  placeholder="comment"
                   placeholderTextColor={theme.muted}
                   value={commentDrafts[post.id] || ""}
                   onChangeText={(text) =>
@@ -747,9 +784,7 @@ export default function App() {
         <View style={styles.cameraCaptureScreen}>
           <View style={styles.cameraCaptureHeader}>
             <Text style={styles.cameraCaptureTitle}>Line up your bev</Text>
-            <Text style={styles.cameraCaptureText}>
-              This is the same 4:5 shape used in the feed.
-            </Text>
+            <Text style={styles.cameraCaptureText}>Same 4:5 shape as the feed.</Text>
           </View>
 
           <View style={styles.cameraFrame}>
@@ -788,9 +823,7 @@ export default function App() {
 
           <View style={styles.scannerOverlay}>
             <Text style={styles.scannerTitle}>Scan barcode</Text>
-            <Text style={styles.scannerText}>
-              Center the barcode in the box. This should fill in the drink faster.
-            </Text>
+            <Text style={styles.scannerText}>Center the barcode in the box.</Text>
             <View style={styles.scanBox} />
             <TouchableOpacity
               style={styles.scannerClose}
@@ -813,18 +846,14 @@ export default function App() {
           keyboardShouldPersistTaps="handled"
         >
           <Text style={styles.screenTitle}>Today’s Bev</Text>
-          <Text style={styles.screenSubtitle}>
-            Photo, barcode, rating, caption. Keep it fast.
-          </Text>
+          <Text style={styles.screenSubtitle}>Snap, scan, rate, post.</Text>
 
           {renderStepHeader()}
 
           {postStep === 0 && (
             <View style={styles.wizardCard}>
-              <Text style={styles.cardTitle}>Add the photo</Text>
-              <Text style={styles.cardHint}>
-                Open the camera in a 4:5 frame, snap it, and move on.
-              </Text>
+              <Text style={styles.cardTitle}>Add photo</Text>
+              <Text style={styles.cardHint}>Frame it in 4:5 and snap.</Text>
 
               <View style={styles.photoCompactCard}>
                 {imageUri ? (
@@ -840,7 +869,7 @@ export default function App() {
                     {imageUri ? "Photo ready" : "No photo yet"}
                   </Text>
                   <Text style={styles.photoSubtext}>
-                    {imageUri ? "Retake it or keep going." : "Use the same shape as the feed."}
+                    {imageUri ? "Retake or keep going." : "Use the feed shape."}
                   </Text>
 
                   <View style={styles.photoButtonRow}>
@@ -861,15 +890,14 @@ export default function App() {
 
           {postStep === 1 && (
             <View style={styles.wizardCard}>
-              <Text style={styles.cardTitle}>Scan the drink</Text>
-              <Text style={styles.cardHint}>
-                Barcode first. Manual edit only if the lookup misses.
-              </Text>
+              <Text style={styles.cardTitle}>Drink details</Text>
+              <Text style={styles.cardHint}>Scan it, or type it manually.</Text>
 
               <TouchableOpacity style={styles.scanButton} onPress={startScanner}>
-                <Text style={styles.scanButtonText}>Scan Barcode</Text>
+                <Text style={styles.scanButtonText}>Scan barcode</Text>
               </TouchableOpacity>
 
+              <Text style={styles.manualHint}>No barcode match? Just fill it in below.</Text>
               {barcode ? <Text style={styles.lookupText}>Barcode: {barcode}</Text> : null}
               {lookupStatus ? <Text style={styles.lookupText}>{lookupStatus}</Text> : null}
 
@@ -916,14 +944,19 @@ export default function App() {
           {postStep === 2 && (
             <View style={styles.wizardCard}>
               <Text style={styles.cardTitle}>Rate and post</Text>
-              <Text style={styles.cardHint}>One tap rating, optional caption, done.</Text>
+              <Text style={styles.cardHint}>Pick a rating. Caption is optional.</Text>
 
-              {imageUri ? (
-                <Image source={{ uri: imageUri }} style={styles.reviewImage} />
-              ) : null}
+              <View style={styles.reviewSummaryCard}>
+                {imageUri ? (
+                  <Image source={{ uri: imageUri }} style={styles.reviewThumbnail} />
+                ) : null}
 
-              <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
-              <Text style={styles.reviewFlavor}>{flavor || "Flavor"}</Text>
+                <View style={styles.reviewTextWrap}>
+                  <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
+                  <Text style={styles.reviewFlavor}>{flavor || "Flavor"}</Text>
+                  <Text style={styles.reviewCategory}>{category}</Text>
+                </View>
+              </View>
 
               <View style={styles.ratingHeaderRow}>
                 <Text style={styles.inputLabel}>Rating</Text>
@@ -962,7 +995,7 @@ export default function App() {
               <Text style={styles.inputLabel}>Caption</Text>
               <TextInput
                 style={[styles.input, styles.captionInput]}
-                placeholder="rare find, elite, mid, gas station pull..."
+                placeholder="rare find, elite, mid..."
                 placeholderTextColor={theme.muted}
                 value={caption}
                 onChangeText={setCaption}
@@ -997,7 +1030,7 @@ export default function App() {
               <Text style={styles.historyDate}>{post.date}</Text>
               <Text style={styles.historyBev}>{post.brand}</Text>
               <Text style={styles.historyFlavor}>{post.flavor}</Text>
-              <Text style={styles.historyRating}>{post.rating}/10</Text>
+              <Text style={styles.historyRating}>{formatRating(post.rating)}</Text>
             </View>
           </View>
         ))}
@@ -1172,6 +1205,12 @@ export default function App() {
                 </Text>
               </TouchableOpacity>
             ))}
+          </View>
+        ) : null}
+
+        {toastMessage ? (
+          <View style={styles.toast} pointerEvents="none">
+            <Text style={styles.toastText}>{toastMessage}</Text>
           </View>
         ) : null}
 
@@ -1619,10 +1658,18 @@ function createStyles(theme) {
       borderRadius: 20,
       alignItems: "center",
     },
+    primaryButtonDisabled: {
+      backgroundColor: theme.surface2,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
     primaryButtonText: {
       color: "#0B0D0C",
       fontSize: 16,
       fontWeight: "900",
+    },
+    primaryButtonTextDisabled: {
+      color: theme.muted,
     },
     secondaryButton: {
       flex: 1,
@@ -1852,16 +1899,22 @@ function createStyles(theme) {
       padding: 16,
       borderRadius: 20,
       alignItems: "center",
-      marginBottom: 12,
+      marginBottom: 8,
     },
     scanButtonText: {
       color: "#0B0D0C",
       fontSize: 16,
       fontWeight: "900",
     },
+    manualHint: {
+      color: theme.muted,
+      fontSize: 12,
+      fontWeight: "800",
+      marginBottom: 10,
+    },
     lookupText: {
       color: theme.muted,
-      marginBottom: 10,
+      marginBottom: 8,
       fontWeight: "700",
     },
     inputLabel: {
@@ -1905,23 +1958,48 @@ function createStyles(theme) {
     chipTextActive: {
       color: "#0B0D0C",
     },
-    reviewImage: {
-      width: "100%",
-      aspectRatio: 4 / 5,
-      borderRadius: 24,
-      marginBottom: 16,
+    reviewSummaryCard: {
       backgroundColor: theme.surface2,
+      borderRadius: 22,
+      padding: 10,
+      borderWidth: 1,
+      borderColor: theme.border,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      marginBottom: 12,
+    },
+    reviewThumbnail: {
+      width: 68,
+      aspectRatio: 4 / 5,
+      borderRadius: 16,
+      backgroundColor: theme.surface,
+    },
+    reviewTextWrap: {
+      flex: 1,
     },
     reviewBrand: {
       color: theme.text,
-      fontSize: 24,
+      fontSize: 21,
       fontWeight: "900",
     },
     reviewFlavor: {
       color: theme.muted,
-      fontSize: 16,
+      fontSize: 15,
       fontWeight: "800",
-      marginBottom: 14,
+      marginTop: 2,
+    },
+    reviewCategory: {
+      alignSelf: "flex-start",
+      color: theme.accent,
+      fontSize: 12,
+      fontWeight: "900",
+      backgroundColor: theme.accentSoft,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 999,
+      marginTop: 8,
+      overflow: "hidden",
     },
     ratingHeaderRow: {
       flexDirection: "row",
@@ -1938,13 +2016,13 @@ function createStyles(theme) {
       flexDirection: "row",
       flexWrap: "wrap",
       justifyContent: "space-between",
-      rowGap: 8,
+      rowGap: 6,
       marginBottom: 8,
     },
     ratingBubble: {
       width: "18%",
-      height: 38,
-      borderRadius: 19,
+      height: 36,
+      borderRadius: 18,
       backgroundColor: theme.surface2,
       borderColor: theme.border,
       borderWidth: 1,
@@ -1973,7 +2051,7 @@ function createStyles(theme) {
       fontWeight: "800",
     },
     captionInput: {
-      minHeight: 105,
+      minHeight: 92,
       textAlignVertical: "top",
       lineHeight: 22,
     },
@@ -2112,6 +2190,26 @@ function createStyles(theme) {
     },
     activeTabText: {
       color: "#0B0D0C",
+    },
+    toast: {
+      position: "absolute",
+      left: 20,
+      right: 20,
+      bottom: 84,
+      backgroundColor: theme.text,
+      borderRadius: 999,
+      paddingVertical: 12,
+      paddingHorizontal: 16,
+      alignItems: "center",
+      shadowColor: "#000",
+      shadowOpacity: 0.22,
+      shadowRadius: 12,
+      elevation: 8,
+      zIndex: 50,
+    },
+    toastText: {
+      color: theme.bg,
+      fontWeight: "900",
     },
   });
 }

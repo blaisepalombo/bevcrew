@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -14,6 +15,11 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import {
+  GestureHandlerRootView,
+  PinchGestureHandler,
+  State,
+} from "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -82,24 +88,59 @@ function formatDate(dateString) {
   });
 }
 
-function getTouchDistance(event) {
-  const touches = event.nativeEvent?.touches || [];
-
-  if (touches.length < 2) {
-    return null;
-  }
-
-  const [firstTouch, secondTouch] = touches;
-  const dx = firstTouch.pageX - secondTouch.pageX;
-  const dy = firstTouch.pageY - secondTouch.pageY;
-
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
 function getVisibleReactionEntries(reactions) {
   return Object.entries(reactions || {})
     .filter(([emoji, count]) => emoji !== DEFAULT_REACTION && Number(count) > 0)
     .sort((first, second) => Number(second[1]) - Number(first[1]));
+}
+
+function PinchZoomImage({ uri, styles }) {
+  const pinchScale = useRef(new Animated.Value(1)).current;
+
+  const displayScale = pinchScale.interpolate({
+    inputRange: [1, 2, 4],
+    outputRange: [1, 1.35, 2],
+    extrapolate: "clamp",
+  });
+
+  const onPinchGestureEvent = Animated.event(
+    [{ nativeEvent: { scale: pinchScale } }],
+    { useNativeDriver: true }
+  );
+
+  function resetPinch(event) {
+    const { oldState, state } = event.nativeEvent;
+
+    if (
+      oldState === State.ACTIVE ||
+      state === State.END ||
+      state === State.CANCELLED ||
+      state === State.FAILED
+    ) {
+      Animated.spring(pinchScale, {
+        toValue: 1,
+        useNativeDriver: true,
+        friction: 7,
+        tension: 80,
+      }).start();
+    }
+  }
+
+  return (
+    <PinchGestureHandler
+      minPointers={2}
+      onGestureEvent={onPinchGestureEvent}
+      onHandlerStateChange={resetPinch}
+    >
+      <Animated.View style={styles.postImageFrame}>
+        <Animated.Image
+          source={{ uri }}
+          style={[styles.postImage, { transform: [{ scale: displayScale }] }]}
+          resizeMode="cover"
+        />
+      </Animated.View>
+    </PinchGestureHandler>
+  );
 }
 
 export default function App() {
@@ -109,7 +150,6 @@ export default function App() {
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const longPressUsedRef = useRef(false);
-  const pinchStartRef = useRef(null);
 
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
@@ -133,7 +173,6 @@ export default function App() {
   const [reactionPickerPostId, setReactionPickerPostId] = useState(null);
   const [customEmojiPostId, setCustomEmojiPostId] = useState(null);
   const [customEmojiInput, setCustomEmojiInput] = useState("");
-  const [pinchScale, setPinchScale] = useState(null);
 
   const myPosts = posts.filter((post) => post.user === "Blaise");
   const streak = myPosts.length;
@@ -524,44 +563,6 @@ export default function App() {
     }
   }
 
-  function startImageTouch(postId, event) {
-    const distance = getTouchDistance(event);
-
-    if (!distance) return;
-
-    pinchStartRef.current = { postId, distance };
-    setPinchScale({ postId, scale: 1 });
-  }
-
-  function moveImageTouch(postId, event) {
-    const distance = getTouchDistance(event);
-
-    if (!distance) return;
-
-    const start = pinchStartRef.current;
-
-    if (!start || start.postId !== postId) {
-      pinchStartRef.current = { postId, distance };
-      setPinchScale({ postId, scale: 1 });
-      return;
-    }
-
-    const rawScale = distance / start.distance;
-    const dampenedScale = 1 + (rawScale - 1) * 0.32;
-    const nextScale = Math.min(Math.max(dampenedScale, 1), 1.9);
-
-    setPinchScale({ postId, scale: nextScale });
-  }
-
-  function endImageTouch(event) {
-    const touches = event.nativeEvent?.touches || [];
-
-    if (touches.length < 2) {
-      pinchStartRef.current = null;
-      setPinchScale(null);
-    }
-  }
-
   function renderStepHeader() {
     return (
       <View style={styles.stepWrap}>
@@ -667,8 +668,6 @@ export default function App() {
         </View>
 
         {posts.map((post) => {
-          const currentScale =
-            pinchScale?.postId === post.id ? pinchScale.scale : 1;
           const visibleReactions = getVisibleReactionEntries(post.reactions);
 
           return (
@@ -685,22 +684,7 @@ export default function App() {
               </View>
 
               {post.imageUri ? (
-                <View
-                  style={styles.postImageFrame}
-                  onTouchStart={(event) => startImageTouch(post.id, event)}
-                  onTouchMove={(event) => moveImageTouch(post.id, event)}
-                  onTouchEnd={endImageTouch}
-                  onTouchCancel={endImageTouch}
-                >
-                  <Image
-                    source={{ uri: post.imageUri }}
-                    style={[
-                      styles.postImage,
-                      { transform: [{ scale: currentScale }] },
-                    ]}
-                    resizeMode="cover"
-                  />
-                </View>
+                <PinchZoomImage uri={post.imageUri} styles={styles} />
               ) : (
                 <View style={styles.placeholderPortrait}>
                   <Text style={styles.photoText}>4:5 bev photo</Text>
@@ -1123,58 +1107,64 @@ export default function App() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
+    <GestureHandlerRootView style={styles.gestureRoot}>
+      <SafeAreaView style={styles.container}>
+        <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
 
-      {!scannerOpen ? (
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.logo}>bevcrew</Text>
-            <Text style={styles.subtitle}>daily bevs with friends</Text>
-          </View>
+        {!scannerOpen ? (
+          <View style={styles.header}>
+            <View>
+              <Text style={styles.logo}>bevcrew</Text>
+              <Text style={styles.subtitle}>daily bevs with friends</Text>
+            </View>
 
-          <TouchableOpacity style={styles.themeButton} onPress={toggleTheme}>
-            <Text style={styles.themeButtonText}>
-              {themeMode === "dark" ? "Light" : "Dark"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      ) : null}
-
-      {activeTab === "Feed" && renderFeed()}
-      {activeTab === "Post" && renderPostFlow()}
-      {activeTab === "History" && renderHistory()}
-      {activeTab === "Profile" && renderProfile()}
-
-      {!scannerOpen ? (
-        <View style={styles.tabs}>
-          {["Feed", "Post", "History", "Profile"].map((tab) => (
-            <TouchableOpacity
-              key={tab}
-              style={[styles.tab, activeTab === tab && styles.activeTab]}
-              onPress={() => setActiveTab(tab)}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === tab && styles.activeTabText,
-                ]}
-              >
-                {tab}
+            <TouchableOpacity style={styles.themeButton} onPress={toggleTheme}>
+              <Text style={styles.themeButtonText}>
+                {themeMode === "dark" ? "Light" : "Dark"}
               </Text>
             </TouchableOpacity>
-          ))}
-        </View>
-      ) : null}
+          </View>
+        ) : null}
 
-      {renderReactionPicker()}
-      {renderCustomEmojiPicker()}
-    </SafeAreaView>
+        {activeTab === "Feed" && renderFeed()}
+        {activeTab === "Post" && renderPostFlow()}
+        {activeTab === "History" && renderHistory()}
+        {activeTab === "Profile" && renderProfile()}
+
+        {!scannerOpen ? (
+          <View style={styles.tabs}>
+            {["Feed", "Post", "History", "Profile"].map((tab) => (
+              <TouchableOpacity
+                key={tab}
+                style={[styles.tab, activeTab === tab && styles.activeTab]}
+                onPress={() => setActiveTab(tab)}
+              >
+                <Text
+                  style={[
+                    styles.tabText,
+                    activeTab === tab && styles.activeTabText,
+                  ]}
+                >
+                  {tab}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
+
+        {renderReactionPicker()}
+        {renderCustomEmojiPicker()}
+      </SafeAreaView>
+    </GestureHandlerRootView>
   );
 }
 
 function createStyles(theme) {
   return StyleSheet.create({
+    gestureRoot: {
+      flex: 1,
+      backgroundColor: theme.bg,
+    },
     container: {
       flex: 1,
       backgroundColor: theme.bg,

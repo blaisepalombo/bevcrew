@@ -1,20 +1,1443 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { useState } from "react";
+import {
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { StatusBar } from "expo-status-bar";
+import * as ImagePicker from "expo-image-picker";
+import { CameraView, useCameraPermissions } from "expo-camera";
+
+const reactionOptions = ["🔥", "💯", "😮", "🤢"];
+
+const starterPosts = [
+  {
+    id: 1,
+    user: "Blaise",
+    brand: "Ghost",
+    flavor: "Sour Patch Blue Raspberry",
+    category: "Energy",
+    rating: "9",
+    caption: "Elite gas station find.",
+    date: "Today",
+    barcode: "Example",
+    imageUri: null,
+    reactions: { "🔥": 4, "💯": 2, "😮": 1, "🤢": 0 },
+    comments: [
+      { id: 1, user: "Tyler", text: "That one is solid." },
+    ],
+  },
+  {
+    id: 2,
+    user: "Tyler",
+    brand: "Monster",
+    flavor: "Ultra White",
+    category: "Energy",
+    rating: "8",
+    caption: "Reliable.",
+    date: "Today",
+    barcode: null,
+    imageUri: null,
+    reactions: { "🔥": 2, "💯": 1, "😮": 0, "🤢": 0 },
+    comments: [],
+  },
+];
+
+const palettes = {
+  dark: {
+    mode: "dark",
+    bg: "#0B0D0C",
+    surface: "#151816",
+    surface2: "#1F2420",
+    text: "#F4F7F2",
+    muted: "#9EA79D",
+    border: "#2A302C",
+    primary: "#8BFF5A",
+    primarySoft: "#20331B",
+    accent: "#FF4F67",
+    accentSoft: "#331A20",
+    input: "#171B18",
+    tab: "#101311",
+  },
+  light: {
+    mode: "light",
+    bg: "#F7F8F3",
+    surface: "#FFFFFF",
+    surface2: "#EEF2EA",
+    text: "#121512",
+    muted: "#697166",
+    border: "#DCE2D7",
+    primary: "#4FD12F",
+    primarySoft: "#E7FADA",
+    accent: "#E8485C",
+    accentSoft: "#FFE5E8",
+    input: "#FFFFFF",
+    tab: "#FFFFFF",
+  },
+};
 
 export default function App() {
+  const [themeMode, setThemeMode] = useState("dark");
+  const theme = palettes[themeMode];
+  const styles = createStyles(theme);
+
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+
+  const [activeTab, setActiveTab] = useState("Feed");
+  const [posts, setPosts] = useState(starterPosts);
+  const [commentDrafts, setCommentDrafts] = useState({});
+
+  const [postStep, setPostStep] = useState(0);
+  const [imageUri, setImageUri] = useState(null);
+  const [barcode, setBarcode] = useState("");
+  const [brand, setBrand] = useState("");
+  const [flavor, setFlavor] = useState("");
+  const [category, setCategory] = useState("Energy");
+  const [rating, setRating] = useState("");
+  const [caption, setCaption] = useState("");
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanned, setScanned] = useState(false);
+  const [lookupStatus, setLookupStatus] = useState("");
+
+  const myPosts = posts.filter((post) => post.user === "Blaise");
+  const streak = myPosts.length;
+  const steps = ["Photo", "Scan", "Post"];
+  const categories = ["Energy", "Soda", "Coffee", "Water", "Other"];
+
+  function toggleTheme() {
+    setThemeMode(themeMode === "dark" ? "light" : "dark");
+  }
+
+  function resetPostFlow() {
+    setPostStep(0);
+    setImageUri(null);
+    setBarcode("");
+    setBrand("");
+    setFlavor("");
+    setCategory("Energy");
+    setRating("");
+    setCaption("");
+    setScannerOpen(false);
+    setScanned(false);
+    setLookupStatus("");
+  }
+
+  async function takePhoto() {
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert("Permission needed", "Camera access is needed to take a bev photo.");
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      allowsEditing: true,
+      aspect: [4, 5],
+      quality: 0.85,
+    });
+
+    if (!result.canceled) {
+      setImageUri(result.assets[0].uri);
+    }
+  }
+
+  async function pickImage() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert("Permission needed", "Photo access is needed to pick a bev photo.");
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [4, 5],
+      quality: 0.85,
+    });
+
+    if (!result.canceled) {
+      setImageUri(result.assets[0].uri);
+    }
+  }
+
+  async function startScanner() {
+    if (!cameraPermission?.granted) {
+      const permission = await requestCameraPermission();
+
+      if (!permission.granted) {
+        Alert.alert("Permission needed", "Camera access is needed to scan a barcode.");
+        return;
+      }
+    }
+
+    setScanned(false);
+    setScannerOpen(true);
+    setLookupStatus("");
+  }
+
+  async function handleBarcodeScanned(result) {
+    if (scanned) return;
+
+    const scannedCode = result.data;
+    setScanned(true);
+    setScannerOpen(false);
+    setBarcode(scannedCode);
+    setLookupStatus("Looking up drink...");
+
+    await lookupBarcode(scannedCode);
+  }
+
+  async function lookupBarcode(code) {
+    try {
+      const response = await fetch(
+        `https://world.openfoodfacts.org/api/v2/product/${code}.json`
+      );
+
+      const data = await response.json();
+
+      if (data.status === 1 && data.product) {
+        const product = data.product;
+        const foundBrand = product.brands
+          ? product.brands.split(",")[0].trim()
+          : "";
+        const foundName = product.product_name || product.generic_name || "";
+
+        if (foundBrand) setBrand(foundBrand);
+        if (foundName) setFlavor(foundName);
+        setLookupStatus("Found it. Check the details before posting.");
+      } else {
+        setLookupStatus("Barcode saved, but no product match. Add it manually.");
+      }
+    } catch (error) {
+      setLookupStatus("Barcode saved, but lookup failed. Add it manually.");
+    }
+  }
+
+  function goNext() {
+    if (postStep === 0 && !imageUri) {
+      Alert.alert("Add a photo", "Take or choose a 4:5 portrait photo first.");
+      return;
+    }
+
+    if (postStep === 1 && (!brand.trim() || !flavor.trim())) {
+      Alert.alert("Missing info", "Scan the barcode or add the brand and flavor.");
+      return;
+    }
+
+    if (postStep < steps.length - 1) {
+      setPostStep(postStep + 1);
+    }
+  }
+
+  function postBev() {
+    if (!imageUri || !brand.trim() || !flavor.trim()) {
+      Alert.alert("Missing info", "Add a photo, brand, and flavor first.");
+      return;
+    }
+
+    const newPost = {
+      id: Date.now(),
+      user: "Blaise",
+      brand: brand.trim(),
+      flavor: flavor.trim(),
+      category,
+      rating: rating.trim() || "-",
+      caption: caption.trim(),
+      date: "Today",
+      barcode: barcode || null,
+      imageUri,
+      reactions: { "🔥": 0, "💯": 0, "😮": 0, "🤢": 0 },
+      comments: [],
+    };
+
+    setPosts([newPost, ...posts]);
+    resetPostFlow();
+    setActiveTab("Feed");
+  }
+
+  function reactToPost(postId, emoji) {
+    setPosts(
+      posts.map((post) =>
+        post.id === postId
+          ? {
+              ...post,
+              reactions: {
+                ...post.reactions,
+                [emoji]: (post.reactions[emoji] || 0) + 1,
+              },
+            }
+          : post
+      )
+    );
+  }
+
+  function addComment(postId) {
+    const text = (commentDrafts[postId] || "").trim();
+
+    if (!text) return;
+
+    setPosts(
+      posts.map((post) =>
+        post.id === postId
+          ? {
+              ...post,
+              comments: [
+                ...post.comments,
+                { id: Date.now(), user: "Blaise", text },
+              ],
+            }
+          : post
+      )
+    );
+
+    setCommentDrafts({ ...commentDrafts, [postId]: "" });
+  }
+
+  function renderStepHeader() {
+    return (
+      <View style={styles.stepWrap}>
+        {steps.map((step, index) => (
+          <View key={step} style={styles.stepItem}>
+            <View
+              style={[
+                styles.stepDot,
+                index <= postStep && styles.stepDotActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.stepNumber,
+                  index <= postStep && styles.stepNumberActive,
+                ]}
+              >
+                {index + 1}
+              </Text>
+            </View>
+            <Text
+              style={[
+                styles.stepLabel,
+                index === postStep && styles.stepLabelActive,
+              ]}
+            >
+              {step}
+            </Text>
+          </View>
+        ))}
+      </View>
+    );
+  }
+
+  function renderPostButtons() {
+    return (
+      <View style={styles.wizardButtons}>
+        {postStep > 0 ? (
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            onPress={() => setPostStep(postStep - 1)}
+          >
+            <Text style={styles.secondaryButtonText}>Back</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.secondaryButton} onPress={resetPostFlow}>
+            <Text style={styles.secondaryButtonText}>Clear</Text>
+          </TouchableOpacity>
+        )}
+
+        {postStep < steps.length - 1 ? (
+          <TouchableOpacity style={styles.primaryButton} onPress={goNext}>
+            <Text style={styles.primaryButtonText}>Next</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.primaryButton} onPress={postBev}>
+            <Text style={styles.primaryButtonText}>Post Bev</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  }
+
+  function renderFeed() {
+    return (
+      <ScrollView
+        style={styles.content}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.heroCard}>
+          <View>
+            <Text style={styles.heroTitle}>Crew Feed</Text>
+            <Text style={styles.heroText}>See what everyone is sipping today.</Text>
+          </View>
+
+          <TouchableOpacity
+            style={styles.heroButton}
+            onPress={() => setActiveTab("Post")}
+          >
+            <Text style={styles.heroButtonText}>Post</Text>
+          </TouchableOpacity>
+        </View>
+
+        {posts.map((post) => (
+          <View key={post.id} style={styles.feedCard}>
+            <View style={styles.cardTop}>
+              <View>
+                <Text style={styles.username}>{post.user}</Text>
+                <Text style={styles.date}>{post.date}</Text>
+              </View>
+
+              <View style={styles.categoryPill}>
+                <Text style={styles.categoryPillText}>{post.category}</Text>
+              </View>
+            </View>
+
+            {post.imageUri ? (
+              <Image
+                source={{ uri: post.imageUri }}
+                style={styles.postImage}
+                resizeMode="cover"
+              />
+            ) : (
+              <View style={styles.placeholderPortrait}>
+                <Text style={styles.photoText}>4:5 bev photo</Text>
+              </View>
+            )}
+
+            <Text style={styles.bevName}>{post.brand}</Text>
+            <Text style={styles.flavorName}>{post.flavor}</Text>
+
+            <View style={styles.metaRow}>
+              <Text style={styles.rating}>Rating: {post.rating}/10</Text>
+              {post.barcode ? (
+                <Text style={styles.barcodeSmall}>UPC saved</Text>
+              ) : null}
+            </View>
+
+            {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
+
+            <View style={styles.reactionRow}>
+              {reactionOptions.map((emoji) => (
+                <TouchableOpacity
+                  key={emoji}
+                  style={styles.reactionButton}
+                  onPress={() => reactToPost(post.id, emoji)}
+                >
+                  <Text style={styles.reactionText}>
+                    {emoji} {post.reactions[emoji] || 0}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {post.comments.length > 0 ? (
+              <View style={styles.commentsBox}>
+                {post.comments.map((comment) => (
+                  <Text key={comment.id} style={styles.commentText}>
+                    <Text style={styles.commentUser}>{comment.user}: </Text>
+                    {comment.text}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+
+            <View style={styles.commentRow}>
+              <TextInput
+                style={styles.commentInput}
+                placeholder="leave a comment"
+                placeholderTextColor={theme.muted}
+                value={commentDrafts[post.id] || ""}
+                onChangeText={(text) =>
+                  setCommentDrafts({ ...commentDrafts, [post.id]: text })
+                }
+              />
+
+              <TouchableOpacity
+                style={styles.commentButton}
+                onPress={() => addComment(post.id)}
+              >
+                <Text style={styles.commentButtonText}>Send</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ))}
+      </ScrollView>
+    );
+  }
+
+  function renderPostFlow() {
+    if (scannerOpen) {
+      return (
+        <View style={styles.scannerScreen}>
+          <CameraView
+            style={styles.camera}
+            facing="back"
+            onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
+            barcodeScannerSettings={{
+              barcodeTypes: ["ean13", "ean8", "upc_a", "upc_e"],
+            }}
+          />
+
+          <View style={styles.scannerOverlay}>
+            <Text style={styles.scannerTitle}>Scan barcode</Text>
+            <Text style={styles.scannerText}>
+              Center the barcode in the box. This should fill in the drink faster.
+            </Text>
+
+            <View style={styles.scanBox} />
+
+            <TouchableOpacity
+              style={styles.scannerClose}
+              onPress={() => setScannerOpen(false)}
+            >
+              <Text style={styles.scannerCloseText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
+    return (
+      <KeyboardAvoidingView
+        style={styles.content}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          <Text style={styles.screenTitle}>Today’s Bev</Text>
+          <Text style={styles.screenSubtitle}>
+            Photo, barcode, rating, caption. Keep it fast.
+          </Text>
+
+          {renderStepHeader()}
+
+          {postStep === 0 && (
+            <View style={styles.wizardCard}>
+              <Text style={styles.cardTitle}>Add the photo</Text>
+              <Text style={styles.cardHint}>
+                Use a 4:5 portrait shot. That is the default feed shape.
+              </Text>
+
+              <TouchableOpacity style={styles.photoPicker} onPress={takePhoto}>
+                {imageUri ? (
+                  <Image
+                    source={{ uri: imageUri }}
+                    style={styles.previewImage}
+                    resizeMode="cover"
+                  />
+                ) : (
+                  <View style={styles.photoEmpty}>
+                    <Text style={styles.photoIcon}>＋</Text>
+                    <Text style={styles.photoText}>Tap to take photo</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.secondaryFull} onPress={pickImage}>
+                <Text style={styles.secondaryButtonText}>Choose from library</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {postStep === 1 && (
+            <View style={styles.wizardCard}>
+              <Text style={styles.cardTitle}>Scan the drink</Text>
+              <Text style={styles.cardHint}>
+                Barcode first. Manual edit only if the lookup misses.
+              </Text>
+
+              <TouchableOpacity style={styles.scanButton} onPress={startScanner}>
+                <Text style={styles.scanButtonText}>Scan Barcode</Text>
+              </TouchableOpacity>
+
+              {barcode ? (
+                <Text style={styles.lookupText}>Barcode: {barcode}</Text>
+              ) : null}
+
+              {lookupStatus ? (
+                <Text style={styles.lookupText}>{lookupStatus}</Text>
+              ) : null}
+
+              <Text style={styles.inputLabel}>Brand</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Ghost, Monster, Celsius..."
+                placeholderTextColor={theme.muted}
+                value={brand}
+                onChangeText={setBrand}
+              />
+
+              <Text style={styles.inputLabel}>Drink / Flavor</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Sour Patch Blue Raspberry"
+                placeholderTextColor={theme.muted}
+                value={flavor}
+                onChangeText={setFlavor}
+              />
+
+              <Text style={styles.inputLabel}>Category</Text>
+              <View style={styles.chipRow}>
+                {categories.map((item) => (
+                  <TouchableOpacity
+                    key={item}
+                    style={[
+                      styles.chip,
+                      category === item && styles.chipActive,
+                    ]}
+                    onPress={() => setCategory(item)}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        category === item && styles.chipTextActive,
+                      ]}
+                    >
+                      {item}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {postStep === 2 && (
+            <View style={styles.wizardCard}>
+              <Text style={styles.cardTitle}>Rate and post</Text>
+              <Text style={styles.cardHint}>
+                One tap rating, optional caption, done.
+              </Text>
+
+              {imageUri ? (
+                <Image
+                  source={{ uri: imageUri }}
+                  style={styles.reviewImage}
+                  resizeMode="cover"
+                />
+              ) : null}
+
+              <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
+              <Text style={styles.reviewFlavor}>{flavor || "Flavor"}</Text>
+
+              <Text style={styles.inputLabel}>Rating</Text>
+              <View style={styles.ratingRow}>
+                {["6", "7", "8", "9", "10"].map((num) => (
+                  <TouchableOpacity
+                    key={num}
+                    style={[
+                      styles.ratingChip,
+                      rating === num && styles.ratingChipActive,
+                    ]}
+                    onPress={() => setRating(num)}
+                  >
+                    <Text
+                      style={[
+                        styles.ratingChipText,
+                        rating === num && styles.ratingChipTextActive,
+                      ]}
+                    >
+                      {num}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.inputLabel}>Caption</Text>
+              <TextInput
+                style={[styles.input, styles.captionInput]}
+                placeholder="rare find, elite, mid, gas station pull..."
+                placeholderTextColor={theme.muted}
+                value={caption}
+                onChangeText={setCaption}
+                multiline
+              />
+            </View>
+          )}
+
+          {renderPostButtons()}
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  }
+
+  function renderHistory() {
+    return (
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+        <Text style={styles.screenTitle}>Bev History</Text>
+        <Text style={styles.screenSubtitle}>Your personal can trail.</Text>
+
+        {myPosts.map((post) => (
+          <View key={post.id} style={styles.historyItem}>
+            {post.imageUri ? (
+              <Image
+                source={{ uri: post.imageUri }}
+                style={styles.historyImage}
+                resizeMode="cover"
+              />
+            ) : (
+              <View style={styles.historyPlaceholder}>
+                <Text style={styles.photoText}>no photo</Text>
+              </View>
+            )}
+
+            <View style={styles.historyText}>
+              <Text style={styles.historyDate}>{post.date}</Text>
+              <Text style={styles.historyBev}>{post.brand}</Text>
+              <Text style={styles.historyFlavor}>{post.flavor}</Text>
+              <Text style={styles.historyRating}>{post.rating}/10</Text>
+            </View>
+          </View>
+        ))}
+      </ScrollView>
+    );
+  }
+
+  function renderProfile() {
+    return (
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+        <Text style={styles.screenTitle}>Profile</Text>
+        <Text style={styles.screenSubtitle}>Your bev stats so far.</Text>
+
+        <View style={styles.profileCard}>
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>B</Text>
+          </View>
+
+          <Text style={styles.profileName}>Blaise</Text>
+          <Text style={styles.profileHandle}>@blaise</Text>
+
+          <View style={styles.statsRow}>
+            <View style={styles.statBox}>
+              <Text style={styles.statNumber}>{myPosts.length}</Text>
+              <Text style={styles.statLabel}>bevs</Text>
+            </View>
+
+            <View style={styles.statBox}>
+              <Text style={styles.statNumber}>{streak}</Text>
+              <Text style={styles.statLabel}>streak</Text>
+            </View>
+
+            <View style={styles.statBoxAccent}>
+              <Text style={styles.statNumber}>3</Text>
+              <Text style={styles.statLabel}>badges</Text>
+            </View>
+          </View>
+        </View>
+      </ScrollView>
+    );
+  }
+
   return (
-    <View style={styles.container}>
-      <Text>Open up App.js to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
+    <SafeAreaView style={styles.container}>
+      <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
+
+      {!scannerOpen ? (
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.logo}>bevcrew</Text>
+            <Text style={styles.subtitle}>daily bevs with friends</Text>
+          </View>
+
+          <TouchableOpacity style={styles.themeButton} onPress={toggleTheme}>
+            <Text style={styles.themeButtonText}>
+              {themeMode === "dark" ? "Light" : "Dark"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {activeTab === "Feed" && renderFeed()}
+      {activeTab === "Post" && renderPostFlow()}
+      {activeTab === "History" && renderHistory()}
+      {activeTab === "Profile" && renderProfile()}
+
+      {!scannerOpen ? (
+        <View style={styles.tabs}>
+          {["Feed", "Post", "History", "Profile"].map((tab) => (
+            <TouchableOpacity
+              key={tab}
+              style={[styles.tab, activeTab === tab && styles.activeTab]}
+              onPress={() => setActiveTab(tab)}
+            >
+              <Text
+                style={[
+                  styles.tabText,
+                  activeTab === tab && styles.activeTabText,
+                ]}
+              >
+                {tab}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      ) : null}
+    </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+function createStyles(theme) {
+  return StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.bg,
+    },
+    header: {
+      paddingHorizontal: 18,
+      paddingTop: 14,
+      paddingBottom: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.border,
+      backgroundColor: theme.bg,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    logo: {
+      color: theme.text,
+      fontSize: 32,
+      fontWeight: "900",
+      letterSpacing: -1.5,
+    },
+    subtitle: {
+      color: theme.muted,
+      fontSize: 13,
+      marginTop: 2,
+    },
+    themeButton: {
+      backgroundColor: theme.surface,
+      borderColor: theme.border,
+      borderWidth: 1,
+      paddingHorizontal: 14,
+      paddingVertical: 9,
+      borderRadius: 999,
+    },
+    themeButtonText: {
+      color: theme.text,
+      fontWeight: "800",
+      fontSize: 12,
+    },
+    content: {
+      flex: 1,
+      padding: 16,
+    },
+    screenTitle: {
+      color: theme.text,
+      fontSize: 28,
+      fontWeight: "900",
+      letterSpacing: -0.8,
+      marginBottom: 4,
+    },
+    screenSubtitle: {
+      color: theme.muted,
+      fontSize: 14,
+      marginBottom: 18,
+    },
+    heroCard: {
+      backgroundColor: theme.primarySoft,
+      borderRadius: 26,
+      padding: 18,
+      marginBottom: 16,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    heroTitle: {
+      color: theme.text,
+      fontSize: 22,
+      fontWeight: "900",
+    },
+    heroText: {
+      color: theme.muted,
+      marginTop: 4,
+    },
+    heroButton: {
+      backgroundColor: theme.primary,
+      paddingHorizontal: 18,
+      paddingVertical: 11,
+      borderRadius: 999,
+    },
+    heroButtonText: {
+      color: "#0B0D0C",
+      fontWeight: "900",
+    },
+    feedCard: {
+      backgroundColor: theme.surface,
+      borderRadius: 28,
+      padding: 14,
+      marginBottom: 18,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    cardTop: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 12,
+    },
+    username: {
+      color: theme.text,
+      fontSize: 16,
+      fontWeight: "900",
+    },
+    date: {
+      color: theme.muted,
+      marginTop: 2,
+    },
+    categoryPill: {
+      backgroundColor: theme.accentSoft,
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+    },
+    categoryPillText: {
+      color: theme.accent,
+      fontWeight: "900",
+      fontSize: 12,
+    },
+    placeholderPortrait: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      backgroundColor: theme.surface2,
+      borderRadius: 24,
+      justifyContent: "center",
+      alignItems: "center",
+      marginBottom: 14,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    postImage: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      borderRadius: 24,
+      marginBottom: 14,
+      backgroundColor: theme.surface2,
+    },
+    bevName: {
+      color: theme.text,
+      fontSize: 23,
+      fontWeight: "900",
+      letterSpacing: -0.4,
+    },
+    flavorName: {
+      color: theme.muted,
+      fontSize: 16,
+      fontWeight: "700",
+      marginTop: 2,
+      marginBottom: 12,
+    },
+    metaRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 10,
+    },
+    rating: {
+      color: theme.primary,
+      fontWeight: "900",
+    },
+    barcodeSmall: {
+      color: theme.muted,
+      fontSize: 12,
+      fontWeight: "800",
+    },
+    caption: {
+      color: theme.text,
+      lineHeight: 20,
+      backgroundColor: theme.surface2,
+      padding: 12,
+      borderRadius: 16,
+      overflow: "hidden",
+      marginBottom: 12,
+    },
+    reactionRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 12,
+    },
+    reactionButton: {
+      backgroundColor: theme.surface2,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    reactionText: {
+      color: theme.text,
+      fontWeight: "900",
+    },
+    commentsBox: {
+      backgroundColor: theme.surface2,
+      borderRadius: 16,
+      padding: 12,
+      marginBottom: 10,
+    },
+    commentText: {
+      color: theme.text,
+      lineHeight: 20,
+      marginBottom: 4,
+    },
+    commentUser: {
+      fontWeight: "900",
+      color: theme.primary,
+    },
+    commentRow: {
+      flexDirection: "row",
+      gap: 8,
+      alignItems: "center",
+    },
+    commentInput: {
+      flex: 1,
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: 999,
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    commentButton: {
+      backgroundColor: theme.primary,
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderRadius: 999,
+    },
+    commentButtonText: {
+      color: "#0B0D0C",
+      fontWeight: "900",
+    },
+    stepWrap: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      marginBottom: 18,
+      backgroundColor: theme.surface,
+      borderRadius: 22,
+      padding: 12,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    stepItem: {
+      alignItems: "center",
+      flex: 1,
+    },
+    stepDot: {
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      backgroundColor: theme.surface2,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    stepDotActive: {
+      backgroundColor: theme.primary,
+      borderColor: theme.primary,
+    },
+    stepNumber: {
+      color: theme.muted,
+      fontWeight: "900",
+      fontSize: 12,
+    },
+    stepNumberActive: {
+      color: "#0B0D0C",
+    },
+    stepLabel: {
+      color: theme.muted,
+      fontSize: 11,
+      fontWeight: "800",
+      marginTop: 6,
+    },
+    stepLabelActive: {
+      color: theme.text,
+    },
+    wizardCard: {
+      backgroundColor: theme.surface,
+      borderRadius: 30,
+      padding: 16,
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: 16,
+    },
+    cardTitle: {
+      color: theme.text,
+      fontSize: 24,
+      fontWeight: "900",
+      letterSpacing: -0.6,
+    },
+    cardHint: {
+      color: theme.muted,
+      lineHeight: 20,
+      marginTop: 6,
+      marginBottom: 16,
+    },
+    photoPicker: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      backgroundColor: theme.surface2,
+      borderRadius: 28,
+      overflow: "hidden",
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: 12,
+    },
+    photoEmpty: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    photoIcon: {
+      color: theme.primary,
+      fontSize: 42,
+      fontWeight: "300",
+      marginBottom: 4,
+    },
+    photoText: {
+      color: theme.muted,
+      fontWeight: "800",
+    },
+    previewImage: {
+      width: "100%",
+      height: "100%",
+    },
+    secondaryFull: {
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      padding: 15,
+      borderRadius: 18,
+      alignItems: "center",
+    },
+    inputLabel: {
+      color: theme.text,
+      fontWeight: "900",
+      marginBottom: 8,
+      marginTop: 6,
+    },
+    input: {
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: 18,
+      padding: 15,
+      marginBottom: 12,
+      borderWidth: 1,
+      borderColor: theme.border,
+      fontSize: 16,
+    },
+    captionInput: {
+      minHeight: 105,
+      textAlignVertical: "top",
+      lineHeight: 22,
+    },
+    scanButton: {
+      backgroundColor: theme.primary,
+      padding: 16,
+      borderRadius: 20,
+      alignItems: "center",
+      marginBottom: 12,
+    },
+    scanButtonText: {
+      color: "#0B0D0C",
+      fontSize: 16,
+      fontWeight: "900",
+    },
+    lookupText: {
+      color: theme.muted,
+      marginBottom: 10,
+      fontWeight: "700",
+    },
+    chipRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+      marginTop: 2,
+    },
+    chip: {
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      paddingHorizontal: 13,
+      paddingVertical: 10,
+      borderRadius: 999,
+    },
+    chipActive: {
+      backgroundColor: theme.primary,
+      borderColor: theme.primary,
+    },
+    chipText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    chipTextActive: {
+      color: "#0B0D0C",
+    },
+    ratingRow: {
+      flexDirection: "row",
+      gap: 8,
+      marginBottom: 12,
+    },
+    ratingChip: {
+      flex: 1,
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      paddingVertical: 13,
+      borderRadius: 16,
+      alignItems: "center",
+    },
+    ratingChipActive: {
+      backgroundColor: theme.primary,
+      borderColor: theme.primary,
+    },
+    ratingChipText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    ratingChipTextActive: {
+      color: "#0B0D0C",
+    },
+    wizardButtons: {
+      flexDirection: "row",
+      gap: 10,
+      marginBottom: 24,
+    },
+    primaryButton: {
+      flex: 1,
+      backgroundColor: theme.primary,
+      padding: 16,
+      borderRadius: 20,
+      alignItems: "center",
+    },
+    primaryButtonText: {
+      color: "#0B0D0C",
+      fontSize: 16,
+      fontWeight: "900",
+    },
+    secondaryButton: {
+      flex: 1,
+      backgroundColor: theme.surface,
+      padding: 16,
+      borderRadius: 20,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    secondaryButtonText: {
+      color: theme.text,
+      fontSize: 16,
+      fontWeight: "900",
+    },
+    reviewImage: {
+      width: "100%",
+      aspectRatio: 4 / 5,
+      borderRadius: 24,
+      marginBottom: 16,
+      backgroundColor: theme.surface2,
+    },
+    reviewBrand: {
+      color: theme.text,
+      fontSize: 24,
+      fontWeight: "900",
+    },
+    reviewFlavor: {
+      color: theme.muted,
+      fontSize: 16,
+      fontWeight: "800",
+      marginBottom: 14,
+    },
+    scannerScreen: {
+      flex: 1,
+      backgroundColor: "#000000",
+    },
+    camera: {
+      flex: 1,
+    },
+    scannerOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      padding: 22,
+      justifyContent: "space-between",
+      alignItems: "center",
+      backgroundColor: "rgba(0,0,0,0.18)",
+    },
+    scannerTitle: {
+      color: "#FFFFFF",
+      fontSize: 28,
+      fontWeight: "900",
+      marginTop: 30,
+    },
+    scannerText: {
+      color: "#FFFFFF",
+      textAlign: "center",
+      lineHeight: 20,
+      maxWidth: 290,
+      fontWeight: "700",
+    },
+    scanBox: {
+      width: 290,
+      height: 170,
+      borderWidth: 3,
+      borderColor: theme.primary,
+      borderRadius: 22,
+      backgroundColor: "rgba(0,0,0,0.08)",
+    },
+    scannerClose: {
+      backgroundColor: "#FFFFFF",
+      paddingHorizontal: 22,
+      paddingVertical: 14,
+      borderRadius: 999,
+      marginBottom: 26,
+    },
+    scannerCloseText: {
+      color: "#111111",
+      fontWeight: "900",
+    },
+    historyItem: {
+      backgroundColor: theme.surface,
+      padding: 12,
+      borderRadius: 24,
+      marginBottom: 12,
+      borderWidth: 1,
+      borderColor: theme.border,
+      flexDirection: "row",
+      gap: 12,
+      alignItems: "center",
+    },
+    historyImage: {
+      width: 86,
+      aspectRatio: 4 / 5,
+      borderRadius: 18,
+      backgroundColor: theme.surface2,
+    },
+    historyPlaceholder: {
+      width: 86,
+      aspectRatio: 4 / 5,
+      borderRadius: 18,
+      backgroundColor: theme.surface2,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    historyText: {
+      flex: 1,
+    },
+    historyDate: {
+      color: theme.primary,
+      fontWeight: "900",
+      marginBottom: 4,
+    },
+    historyBev: {
+      color: theme.text,
+      fontSize: 17,
+      fontWeight: "900",
+    },
+    historyFlavor: {
+      color: theme.muted,
+      marginTop: 2,
+      fontWeight: "700",
+    },
+    historyRating: {
+      color: theme.accent,
+      marginTop: 8,
+      fontWeight: "900",
+    },
+    profileCard: {
+      backgroundColor: theme.surface,
+      borderRadius: 30,
+      padding: 22,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    avatar: {
+      width: 92,
+      height: 92,
+      borderRadius: 46,
+      backgroundColor: theme.primary,
+      justifyContent: "center",
+      alignItems: "center",
+      marginBottom: 12,
+    },
+    avatarText: {
+      color: "#0B0D0C",
+      fontSize: 40,
+      fontWeight: "900",
+    },
+    profileName: {
+      color: theme.text,
+      fontSize: 26,
+      fontWeight: "900",
+    },
+    profileHandle: {
+      color: theme.muted,
+      marginTop: 2,
+      marginBottom: 22,
+    },
+    statsRow: {
+      flexDirection: "row",
+      gap: 10,
+    },
+    statBox: {
+      backgroundColor: theme.surface2,
+      padding: 14,
+      borderRadius: 18,
+      minWidth: 84,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    statBoxAccent: {
+      backgroundColor: theme.accentSoft,
+      padding: 14,
+      borderRadius: 18,
+      minWidth: 84,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    statNumber: {
+      color: theme.text,
+      fontSize: 24,
+      fontWeight: "900",
+    },
+    statLabel: {
+      color: theme.muted,
+      marginTop: 2,
+      fontWeight: "800",
+    },
+    tabs: {
+      flexDirection: "row",
+      padding: 10,
+      borderTopWidth: 1,
+      borderTopColor: theme.border,
+      backgroundColor: theme.tab,
+    },
+    tab: {
+      flex: 1,
+      paddingVertical: 11,
+      borderRadius: 16,
+      alignItems: "center",
+    },
+    activeTab: {
+      backgroundColor: theme.primary,
+    },
+    tabText: {
+      color: theme.muted,
+      fontWeight: "900",
+      fontSize: 12,
+    },
+    activeTabText: {
+      color: "#0B0D0C",
+    },
+  });
+}

@@ -86,6 +86,27 @@ function formatRating(value) {
   return value && value !== "-" ? `${value}/10` : "Not rated";
 }
 
+function sanitizeHandle(value) {
+  const cleaned = String(value || "")
+    .toLowerCase()
+    .replace(/^@/, "")
+    .replace(/[^a-z0-9_]/g, "")
+    .slice(0, 24);
+
+  if (cleaned.length >= 3) return cleaned;
+  return `user${Math.floor(100 + Math.random() * 900)}`;
+}
+
+function deriveNameFromEmail(email) {
+  const base = String(email || "bev user").split("@")[0] || "bev user";
+  return base
+    .replace(/[._-]+/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Bev User";
+}
+
 function getVisibleReactionEntries(reactions) {
   return Object.entries(reactions || {})
     .filter(([emoji, count]) => emoji !== DEFAULT_REACTION && Number(count) > 0)
@@ -151,6 +172,20 @@ export default function App() {
   const photoCameraRef = useRef(null);
   const toastTimerRef = useRef(null);
 
+  const [session, setSession] = useState(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authMode, setAuthMode] = useState("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authDisplayName, setAuthDisplayName] = useState("");
+  const [authHandle, setAuthHandle] = useState("");
+  const [authSaving, setAuthSaving] = useState(false);
+
+  const [profile, setProfile] = useState(null);
+  const [crewMembers, setCrewMembers] = useState([]);
+  const [crewHandleDraft, setCrewHandleDraft] = useState("");
+  const [crewSaving, setCrewSaving] = useState(false);
+
   const [activeTab, setActiveTab] = useState("Feed");
   const [posts, setPosts] = useState([]);
   const [commentDrafts, setCommentDrafts] = useState({});
@@ -175,15 +210,66 @@ export default function App() {
   const [customEmojiPostId, setCustomEmojiPostId] = useState(null);
   const [customEmojiInput, setCustomEmojiInput] = useState("");
 
-  const myPosts = posts.filter((post) => post.user === "Blaise");
+  const user = session?.user || null;
+  const profileDisplayName =
+    profile?.display_name || deriveNameFromEmail(user?.email || "bev user");
+  const profileHandle =
+    profile?.handle || sanitizeHandle(user?.email?.split("@")[0] || profileDisplayName);
+  const avatarLetter = (profileDisplayName.trim()[0] || "B").toUpperCase();
+  const myPosts = posts.filter((post) =>
+    post.userId ? post.userId === user?.id : post.user === profileDisplayName
+  );
   const streak = myPosts.length;
   const steps = ["Photo", "Scan", "Post"];
   const categories = ["Energy", "Soda", "Coffee", "Water", "Other"];
 
   useEffect(() => {
-    loadPosts();
+    let mounted = true;
+
+    async function initAuth() {
+      setAuthChecking(true);
+
+      const { data, error } = await supabase.auth.getSession();
+
+      if (!mounted) return;
+
+      if (error) {
+        Alert.alert("Auth error", error.message);
+        setAuthChecking(false);
+        setLoading(false);
+        return;
+      }
+
+      const nextSession = data.session;
+      setSession(nextSession);
+
+      if (nextSession?.user) {
+        await bootstrapUser(nextSession.user);
+      } else {
+        setLoading(false);
+        setAuthChecking(false);
+      }
+    }
+
+    initAuth();
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+
+      if (nextSession?.user) {
+        bootstrapUser(nextSession.user);
+      } else {
+        setProfile(null);
+        setCrewMembers([]);
+        setPosts([]);
+        setLoading(false);
+        setAuthChecking(false);
+      }
+    });
 
     return () => {
+      mounted = false;
+      listener?.subscription?.unsubscribe?.();
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
   }, []);
@@ -223,7 +309,101 @@ export default function App() {
     setLookupStatus("");
   }
 
-  async function loadPosts() {
+  async function bootstrapUser(authUser) {
+    try {
+      setAuthChecking(true);
+      setLoading(true);
+
+      await ensureProfile(authUser);
+      const members = await loadCrew(authUser.id);
+      await loadPosts(authUser.id, members);
+    } catch (error) {
+      Alert.alert(
+        "Setup needed",
+        error.message || "Could not load your account. Make sure the Supabase SQL setup has been run."
+      );
+      setLoading(false);
+    }
+
+    setAuthChecking(false);
+  }
+
+  async function ensureProfile(authUser) {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", authUser.id)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (data) {
+      setProfile(data);
+      return data;
+    }
+
+    const displayName =
+      authUser.user_metadata?.display_name ||
+      authUser.user_metadata?.name ||
+      deriveNameFromEmail(authUser.email);
+    const metadataHandle = authUser.user_metadata?.handle;
+    const baseHandle = sanitizeHandle(metadataHandle || authUser.email?.split("@")[0]);
+
+    let profileToInsert = {
+      id: authUser.id,
+      display_name: displayName,
+      handle: baseHandle,
+    };
+
+    let insertedResponse = await supabase
+      .from("profiles")
+      .insert(profileToInsert)
+      .select("*")
+      .single();
+
+    if (insertedResponse.error?.code === "23505") {
+      profileToInsert = {
+        ...profileToInsert,
+        handle: `${baseHandle}${Math.floor(100 + Math.random() * 900)}`.slice(0, 24),
+      };
+
+      insertedResponse = await supabase
+        .from("profiles")
+        .insert(profileToInsert)
+        .select("*")
+        .single();
+    }
+
+    if (insertedResponse.error) throw insertedResponse.error;
+
+    setProfile(insertedResponse.data);
+    return insertedResponse.data;
+  }
+
+  async function loadCrew(currentUserId) {
+    if (!currentUserId) return [];
+
+    const { data, error } = await supabase
+      .from("crew_memberships")
+      .select(
+        "member_id, profiles!crew_memberships_member_id_fkey(id, display_name, handle, avatar_url)"
+      )
+      .eq("owner_id", currentUserId)
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+
+    const members = (data || []).map((row) => row.profiles).filter(Boolean);
+    setCrewMembers(members);
+    return members;
+  }
+
+  async function loadPosts(currentUserId = user?.id, members = crewMembers) {
+    if (!currentUserId) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
 
     const { data: postRows, error: postError } = await supabase
@@ -237,7 +417,11 @@ export default function App() {
       return;
     }
 
-    const postIds = postRows.map((post) => post.id);
+    const allowedUserIds = new Set([currentUserId, ...members.map((member) => member.id)]);
+    const filteredPostRows = (postRows || []).filter(
+      (row) => !row.user_id || allowedUserIds.has(row.user_id)
+    );
+    const postIds = filteredPostRows.map((post) => post.id);
     let reactionRows = [];
     let commentRows = [];
 
@@ -257,7 +441,7 @@ export default function App() {
       commentRows = commentsData || [];
     }
 
-    const builtPosts = postRows.map((row) => {
+    const builtPosts = filteredPostRows.map((row) => {
       const reactions = emptyReactions();
 
       reactionRows
@@ -276,6 +460,7 @@ export default function App() {
 
       return {
         id: row.id,
+        userId: row.user_id,
         user: row.user_name,
         brand: row.brand,
         flavor: row.flavor,
@@ -292,6 +477,78 @@ export default function App() {
 
     setPosts(builtPosts);
     setLoading(false);
+  }
+
+  async function handleAuthSubmit() {
+    const cleanEmail = authEmail.trim();
+    const cleanPassword = authPassword.trim();
+    const cleanDisplayName = authDisplayName.trim();
+    const cleanHandle = sanitizeHandle(authHandle);
+
+    if (!cleanEmail || !cleanPassword) {
+      Alert.alert("Missing info", "Enter your email and password.");
+      return;
+    }
+
+    if (cleanPassword.length < 6) {
+      Alert.alert("Password too short", "Use at least 6 characters.");
+      return;
+    }
+
+    if (authMode === "signup" && !cleanDisplayName) {
+      Alert.alert("Missing name", "Add a display name.");
+      return;
+    }
+
+    setAuthSaving(true);
+
+    try {
+      if (authMode === "signup") {
+        const { data, error } = await supabase.auth.signUp({
+          email: cleanEmail,
+          password: cleanPassword,
+          options: {
+            data: {
+              display_name: cleanDisplayName,
+              handle: cleanHandle,
+            },
+          },
+        });
+
+        if (error) throw error;
+
+        if (data.session?.user) {
+          setSession(data.session);
+          await bootstrapUser(data.session.user);
+          showToast("Welcome to bevcrew");
+        } else {
+          showToast("Check your email to confirm");
+        }
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: cleanEmail,
+          password: cleanPassword,
+        });
+
+        if (error) throw error;
+
+        setSession(data.session);
+        if (data.session?.user) await bootstrapUser(data.session.user);
+      }
+    } catch (error) {
+      Alert.alert("Auth failed", error.message || "Could not sign in.");
+    }
+
+    setAuthSaving(false);
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
+    resetPostFlow();
+    setActiveTab("Feed");
+    setProfile(null);
+    setCrewMembers([]);
+    setPosts([]);
   }
 
   async function uploadImageToSupabase(uri) {
@@ -417,7 +674,6 @@ export default function App() {
 
   function goNext() {
     if (!isStepReady()) return;
-
     if (postStep < steps.length - 1) setPostStep(postStep + 1);
   }
 
@@ -433,7 +689,8 @@ export default function App() {
       const uploadedImageUrl = await uploadImageToSupabase(imageUri);
 
       const { error } = await supabase.from("posts").insert({
-        user_name: "Blaise",
+        user_id: user.id,
+        user_name: profileDisplayName,
         brand: brand.trim(),
         flavor: flavor.trim(),
         category,
@@ -447,7 +704,7 @@ export default function App() {
 
       resetPostFlow();
       setActiveTab("Feed");
-      await loadPosts();
+      await loadPosts(user.id, crewMembers);
       showToast("Posted to crew");
     } catch (error) {
       Alert.alert("Save failed", error.message || "Could not save your bev.");
@@ -458,7 +715,7 @@ export default function App() {
 
   function reactToPost(postId, emoji) {
     const cleanEmoji = emoji.trim();
-    if (!cleanEmoji) return;
+    if (!cleanEmoji || !user) return;
 
     longPressUsedRef.current = false;
     setReactionPickerPostId(null);
@@ -481,11 +738,16 @@ export default function App() {
 
     supabase
       .from("reactions")
-      .insert({ post_id: postId, emoji: cleanEmoji, user_name: "Blaise" })
+      .insert({
+        post_id: postId,
+        emoji: cleanEmoji,
+        user_id: user.id,
+        user_name: profileDisplayName,
+      })
       .then(({ error }) => {
         if (error) {
           Alert.alert("Reaction failed", error.message);
-          loadPosts();
+          loadPosts(user.id, crewMembers);
         }
       });
   }
@@ -530,9 +792,9 @@ export default function App() {
 
   async function addComment(postId) {
     const text = (commentDrafts[postId] || "").trim();
-    if (!text) return;
+    if (!text || !user) return;
 
-    const tempComment = { id: `temp-${Date.now()}`, user: "Blaise", text };
+    const tempComment = { id: `temp-${Date.now()}`, user: profileDisplayName, text };
 
     setPosts((currentPosts) =>
       currentPosts.map((post) =>
@@ -546,14 +808,190 @@ export default function App() {
 
     const { error } = await supabase.from("comments").insert({
       post_id: postId,
-      user_name: "Blaise",
+      user_id: user.id,
+      user_name: profileDisplayName,
       text,
     });
 
     if (error) {
       Alert.alert("Comment failed", error.message);
-      await loadPosts();
+      await loadPosts(user.id, crewMembers);
     }
+  }
+
+  async function addCrewMember() {
+    const handle = sanitizeHandle(crewHandleDraft);
+
+    if (!handle || !user) return;
+
+    setCrewSaving(true);
+
+    const { data: foundProfile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, display_name, handle, avatar_url")
+      .eq("handle", handle)
+      .maybeSingle();
+
+    if (profileError) {
+      setCrewSaving(false);
+      Alert.alert("Crew error", profileError.message);
+      return;
+    }
+
+    if (!foundProfile) {
+      setCrewSaving(false);
+      showToast("No user found");
+      return;
+    }
+
+    if (foundProfile.id === user.id) {
+      setCrewSaving(false);
+      showToast("That is you");
+      return;
+    }
+
+    const { error } = await supabase.from("crew_memberships").insert({
+      owner_id: user.id,
+      member_id: foundProfile.id,
+    });
+
+    if (error && error.code !== "23505") {
+      setCrewSaving(false);
+      Alert.alert("Crew error", error.message);
+      return;
+    }
+
+    setCrewHandleDraft("");
+    const members = await loadCrew(user.id);
+    await loadPosts(user.id, members);
+    showToast(error?.code === "23505" ? "Already in crew" : "Added to crew");
+    setCrewSaving(false);
+  }
+
+  async function removeCrewMember(memberId) {
+    if (!user) return;
+
+    const { error } = await supabase
+      .from("crew_memberships")
+      .delete()
+      .eq("owner_id", user.id)
+      .eq("member_id", memberId);
+
+    if (error) {
+      Alert.alert("Crew error", error.message);
+      return;
+    }
+
+    const members = await loadCrew(user.id);
+    await loadPosts(user.id, members);
+    showToast("Removed from crew");
+  }
+
+  function renderAuthScreen() {
+    const isSignup = authMode === "signup";
+
+    return (
+      <KeyboardAvoidingView
+        style={styles.authScreen}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={styles.authScroll}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <Text style={styles.authLogo}>bevcrew</Text>
+          <Text style={styles.authSubtitle}>daily bevs with friends</Text>
+
+          <View style={styles.authCard}>
+            <Text style={styles.authTitle}>{isSignup ? "Create account" : "Log in"}</Text>
+
+            <View style={styles.authModeRow}>
+              <TouchableOpacity
+                style={[styles.authModeButton, !isSignup && styles.authModeButtonActive]}
+                onPress={() => setAuthMode("login")}
+              >
+                <Text style={[styles.authModeText, !isSignup && styles.authModeTextActive]}>
+                  Login
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.authModeButton, isSignup && styles.authModeButtonActive]}
+                onPress={() => setAuthMode("signup")}
+              >
+                <Text style={[styles.authModeText, isSignup && styles.authModeTextActive]}>
+                  Signup
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {isSignup ? (
+              <>
+                <Text style={styles.inputLabel}>Display name</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Blaise"
+                  placeholderTextColor={theme.muted}
+                  value={authDisplayName}
+                  onChangeText={setAuthDisplayName}
+                />
+
+                <Text style={styles.inputLabel}>Handle</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="blaise"
+                  placeholderTextColor={theme.muted}
+                  autoCapitalize="none"
+                  value={authHandle}
+                  onChangeText={setAuthHandle}
+                />
+              </>
+            ) : null}
+
+            <Text style={styles.inputLabel}>Email</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="you@email.com"
+              placeholderTextColor={theme.muted}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              value={authEmail}
+              onChangeText={setAuthEmail}
+            />
+
+            <Text style={styles.inputLabel}>Password</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="at least 6 characters"
+              placeholderTextColor={theme.muted}
+              secureTextEntry
+              value={authPassword}
+              onChangeText={setAuthPassword}
+            />
+
+            <TouchableOpacity
+              style={[styles.primaryButton, authSaving && styles.primaryButtonDisabled]}
+              onPress={handleAuthSubmit}
+              disabled={authSaving}
+            >
+              <Text
+                style={[
+                  styles.primaryButtonText,
+                  authSaving && styles.primaryButtonTextDisabled,
+                ]}
+              >
+                {authSaving ? "Working..." : isSignup ? "Create account" : "Log in"}
+              </Text>
+            </TouchableOpacity>
+
+            <Text style={styles.authFooterText}>
+              {isSignup ? "Already have an account? Tap Login." : "New here? Tap Signup."}
+            </Text>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
   }
 
   function renderStepHeader() {
@@ -667,7 +1105,7 @@ export default function App() {
         <View style={styles.heroCard}>
           <View style={styles.heroTextWrap}>
             <Text style={styles.heroTitle}>Crew Feed</Text>
-            <Text style={styles.heroText}>Today’s drinks from the crew.</Text>
+            <Text style={styles.heroText}>Posts from you and your crew.</Text>
           </View>
 
           <TouchableOpacity
@@ -677,6 +1115,13 @@ export default function App() {
             <Text style={styles.heroButtonText}>Post</Text>
           </TouchableOpacity>
         </View>
+
+        {posts.length === 0 ? (
+          <View style={styles.feedCard}>
+            <Text style={styles.bevName}>No crew posts yet</Text>
+            <Text style={styles.flavorName}>Post a drink or add someone by handle.</Text>
+          </View>
+        ) : null}
 
         {posts.map((post) => {
           const visibleReactions = getVisibleReactionEntries(post.reactions);
@@ -1016,6 +1461,13 @@ export default function App() {
         <Text style={styles.screenTitle}>Bev History</Text>
         <Text style={styles.screenSubtitle}>Your personal can trail.</Text>
 
+        {myPosts.length === 0 ? (
+          <View style={styles.feedCard}>
+            <Text style={styles.bevName}>No posts yet</Text>
+            <Text style={styles.flavorName}>Your posts will show up here.</Text>
+          </View>
+        ) : null}
+
         {myPosts.map((post) => (
           <View key={post.id} style={styles.historyItem}>
             {post.imageUri ? (
@@ -1042,15 +1494,16 @@ export default function App() {
     return (
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         <Text style={styles.screenTitle}>Profile</Text>
-        <Text style={styles.screenSubtitle}>Your bev stats so far.</Text>
+        <Text style={styles.screenSubtitle}>Your bev stats and crew.</Text>
 
         <View style={styles.profileCard}>
           <View style={styles.avatar}>
-            <Text style={styles.avatarText}>B</Text>
+            <Text style={styles.avatarText}>{avatarLetter}</Text>
           </View>
 
-          <Text style={styles.profileName}>Blaise</Text>
-          <Text style={styles.profileHandle}>@blaise</Text>
+          <Text style={styles.profileName}>{profileDisplayName}</Text>
+          <Text style={styles.profileHandle}>@{profileHandle}</Text>
+          <Text style={styles.profileEmail}>{user?.email}</Text>
 
           <View style={styles.statsRow}>
             <View style={styles.statBox}>
@@ -1064,11 +1517,60 @@ export default function App() {
             </View>
 
             <View style={styles.statBoxAccent}>
-              <Text style={styles.statNumber}>3</Text>
-              <Text style={styles.statLabel}>badges</Text>
+              <Text style={styles.statNumber}>{crewMembers.length}</Text>
+              <Text style={styles.statLabel}>crew</Text>
             </View>
           </View>
         </View>
+
+        <View style={styles.crewCard}>
+          <View style={styles.crewTitleRow}>
+            <Text style={styles.cardTitle}>Crew</Text>
+            <Text style={styles.ratingSelected}>{crewMembers.length}</Text>
+          </View>
+
+          <View style={styles.crewAddRow}>
+            <TextInput
+              style={styles.crewInput}
+              placeholder="add by handle"
+              placeholderTextColor={theme.muted}
+              autoCapitalize="none"
+              value={crewHandleDraft}
+              onChangeText={setCrewHandleDraft}
+            />
+            <TouchableOpacity
+              style={[styles.crewButton, crewSaving && styles.primaryButtonDisabled]}
+              onPress={addCrewMember}
+              disabled={crewSaving}
+            >
+              <Text style={styles.crewButtonText}>Add</Text>
+            </TouchableOpacity>
+          </View>
+
+          {crewMembers.length === 0 ? (
+            <Text style={styles.crewEmpty}>Add someone’s handle to see their posts.</Text>
+          ) : null}
+
+          {crewMembers.map((member) => (
+            <View key={member.id} style={styles.crewListItem}>
+              <View>
+                <Text style={styles.crewName}>{member.display_name}</Text>
+                <Text style={styles.crewHandle}>@{member.handle}</Text>
+              </View>
+
+              <TouchableOpacity
+                style={styles.removeButton}
+                onPress={() => removeCrewMember(member.id)}
+              >
+                <Text style={styles.removeButtonText}>Remove</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+        </View>
+
+        <TouchableOpacity style={styles.signOutButton} onPress={signOut}>
+          <Text style={styles.signOutText}>Sign out</Text>
+        </TouchableOpacity>
       </ScrollView>
     );
   }
@@ -1162,6 +1664,40 @@ export default function App() {
     );
   }
 
+  function renderToast() {
+    return toastMessage ? (
+      <View style={styles.toast} pointerEvents="none">
+        <Text style={styles.toastText}>{toastMessage}</Text>
+      </View>
+    ) : null;
+  }
+
+  if (authChecking) {
+    return (
+      <GestureHandlerRootView style={styles.gestureRoot}>
+        <SafeAreaView style={styles.container}>
+          <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
+          <View style={styles.loadingScreen}>
+            <ActivityIndicator size="large" color={theme.primary} />
+            <Text style={styles.loadingText}>Checking account...</Text>
+          </View>
+        </SafeAreaView>
+      </GestureHandlerRootView>
+    );
+  }
+
+  if (!session) {
+    return (
+      <GestureHandlerRootView style={styles.gestureRoot}>
+        <SafeAreaView style={styles.container}>
+          <StatusBar style={theme.mode === "dark" ? "light" : "dark"} />
+          {renderAuthScreen()}
+          {renderToast()}
+        </SafeAreaView>
+      </GestureHandlerRootView>
+    );
+  }
+
   return (
     <GestureHandlerRootView style={styles.gestureRoot}>
       <SafeAreaView style={styles.container}>
@@ -1171,14 +1707,16 @@ export default function App() {
           <View style={styles.header}>
             <View>
               <Text style={styles.logo}>bevcrew</Text>
-              <Text style={styles.subtitle}>daily bevs with friends</Text>
+              <Text style={styles.subtitle}>@{profileHandle}</Text>
             </View>
 
-            <TouchableOpacity style={styles.themeButton} onPress={toggleTheme}>
-              <Text style={styles.themeButtonText}>
-                {themeMode === "dark" ? "Light" : "Dark"}
-              </Text>
-            </TouchableOpacity>
+            <View style={styles.headerRight}>
+              <TouchableOpacity style={styles.themeButton} onPress={toggleTheme}>
+                <Text style={styles.themeButtonText}>
+                  {themeMode === "dark" ? "Light" : "Dark"}
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         ) : null}
 
@@ -1208,12 +1746,7 @@ export default function App() {
           </View>
         ) : null}
 
-        {toastMessage ? (
-          <View style={styles.toast} pointerEvents="none">
-            <Text style={styles.toastText}>{toastMessage}</Text>
-          </View>
-        ) : null}
-
+        {renderToast()}
         {renderReactionPicker()}
         {renderCustomEmojiPicker()}
       </SafeAreaView>
@@ -1241,6 +1774,73 @@ function createStyles(theme) {
       color: theme.muted,
       fontWeight: "800",
     },
+    authScreen: {
+      flex: 1,
+      padding: 16,
+    },
+    authScroll: {
+      flexGrow: 1,
+      justifyContent: "center",
+      paddingVertical: 28,
+    },
+    authLogo: {
+      color: theme.text,
+      fontSize: 42,
+      fontWeight: "900",
+      letterSpacing: -1.8,
+      textAlign: "center",
+    },
+    authSubtitle: {
+      color: theme.muted,
+      textAlign: "center",
+      marginTop: 4,
+      marginBottom: 22,
+      fontWeight: "700",
+    },
+    authCard: {
+      backgroundColor: theme.surface,
+      borderRadius: 30,
+      padding: 18,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    authTitle: {
+      color: theme.text,
+      fontSize: 26,
+      fontWeight: "900",
+      marginBottom: 12,
+    },
+    authModeRow: {
+      flexDirection: "row",
+      backgroundColor: theme.surface2,
+      padding: 4,
+      borderRadius: 999,
+      marginBottom: 14,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    authModeButton: {
+      flex: 1,
+      paddingVertical: 10,
+      borderRadius: 999,
+      alignItems: "center",
+    },
+    authModeButtonActive: {
+      backgroundColor: theme.primary,
+    },
+    authModeText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    authModeTextActive: {
+      color: "#0B0D0C",
+    },
+    authFooterText: {
+      color: theme.muted,
+      textAlign: "center",
+      marginTop: 14,
+      fontWeight: "700",
+    },
     header: {
       paddingHorizontal: 18,
       paddingTop: 14,
@@ -1262,6 +1862,11 @@ function createStyles(theme) {
       color: theme.muted,
       fontSize: 13,
       marginTop: 2,
+    },
+    headerRight: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
     },
     themeButton: {
       backgroundColor: theme.surface,
@@ -2110,6 +2715,7 @@ function createStyles(theme) {
       alignItems: "center",
       borderWidth: 1,
       borderColor: theme.border,
+      marginBottom: 14,
     },
     avatar: {
       width: 92,
@@ -2133,7 +2739,14 @@ function createStyles(theme) {
     profileHandle: {
       color: theme.muted,
       marginTop: 2,
-      marginBottom: 22,
+      fontWeight: "800",
+    },
+    profileEmail: {
+      color: theme.muted,
+      marginTop: 4,
+      marginBottom: 20,
+      fontSize: 12,
+      fontWeight: "700",
     },
     statsRow: {
       flexDirection: "row",
@@ -2166,6 +2779,97 @@ function createStyles(theme) {
       color: theme.muted,
       marginTop: 2,
       fontWeight: "800",
+    },
+    crewCard: {
+      backgroundColor: theme.surface,
+      borderRadius: 28,
+      padding: 16,
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: 14,
+    },
+    crewTitleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 10,
+    },
+    crewAddRow: {
+      flexDirection: "row",
+      gap: 8,
+      alignItems: "center",
+      marginBottom: 12,
+    },
+    crewInput: {
+      flex: 1,
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: 999,
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    crewButton: {
+      backgroundColor: theme.primary,
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+      borderRadius: 999,
+    },
+    crewButtonText: {
+      color: "#0B0D0C",
+      fontWeight: "900",
+    },
+    crewEmpty: {
+      color: theme.muted,
+      fontWeight: "700",
+      lineHeight: 20,
+    },
+    crewListItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      backgroundColor: theme.surface2,
+      borderRadius: 18,
+      padding: 12,
+      marginTop: 8,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    crewName: {
+      color: theme.text,
+      fontWeight: "900",
+      fontSize: 15,
+    },
+    crewHandle: {
+      color: theme.muted,
+      marginTop: 2,
+      fontWeight: "700",
+    },
+    removeButton: {
+      backgroundColor: theme.accentSoft,
+      borderRadius: 999,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    removeButtonText: {
+      color: theme.accent,
+      fontWeight: "900",
+      fontSize: 12,
+    },
+    signOutButton: {
+      backgroundColor: theme.surface,
+      borderRadius: 20,
+      padding: 16,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: 24,
+    },
+    signOutText: {
+      color: theme.accent,
+      fontWeight: "900",
+      fontSize: 16,
     },
     tabs: {
       flexDirection: "row",

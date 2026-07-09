@@ -56,13 +56,16 @@ function formatRating(value) {
   return value && value !== "-" ? `${value}/10` : "Not rated";
 }
 
-function sanitizeHandle(value) {
-  const cleaned = String(value || "")
+function normalizeHandle(value) {
+  return String(value || "")
     .toLowerCase()
     .replace(/^@/, "")
     .replace(/[^a-z0-9_]/g, "")
     .slice(0, 24);
+}
 
+function safeHandle(value) {
+  const cleaned = normalizeHandle(value);
   if (cleaned.length >= 3) return cleaned;
   return `user${Math.floor(100 + Math.random() * 900)}`;
 }
@@ -83,6 +86,41 @@ function getVisibleReactionEntries(reactions) {
   return Object.entries(reactions || {})
     .filter(([emoji, count]) => emoji !== DEFAULT_REACTION && Number(count) > 0)
     .sort((first, second) => Number(second[1]) - Number(first[1]));
+}
+
+function AvatarView({ uri, name, size = 44, theme }) {
+  const letter = (String(name || "B").trim()[0] || "B").toUpperCase();
+
+  if (uri) {
+    return (
+      <Image
+        source={{ uri }}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          backgroundColor: theme.surface2,
+        }}
+      />
+    );
+  }
+
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: theme.primary,
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <Text style={{ color: "#0B0D0C", fontWeight: "900", fontSize: size * 0.42 }}>
+        {letter}
+      </Text>
+    </View>
+  );
 }
 
 function PinchZoomImage({ uri, styles }) {
@@ -159,9 +197,18 @@ export default function App() {
   const [crewSaving, setCrewSaving] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
 
+  const [editProfileOpen, setEditProfileOpen] = useState(false);
+  const [editDisplayName, setEditDisplayName] = useState("");
+  const [editHandle, setEditHandle] = useState("");
+  const [editAvatarUri, setEditAvatarUri] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
+
   const [activeTab, setActiveTab] = useState("Feed");
   const [feedMode, setFeedMode] = useState("crew");
   const [posts, setPosts] = useState([]);
+  const [discoverProfiles, setDiscoverProfiles] = useState([]);
+  const [discoverSearch, setDiscoverSearch] = useState("");
+  const [discoverLoading, setDiscoverLoading] = useState(false);
   const [commentDrafts, setCommentDrafts] = useState({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -185,17 +232,14 @@ export default function App() {
   const [customEmojiInput, setCustomEmojiInput] = useState("");
 
   const user = session?.user || null;
-  const profileDisplayName =
-    profile?.display_name || deriveNameFromEmail(user?.email || "bev user");
-  const profileHandle =
-    profile?.handle || sanitizeHandle(user?.email?.split("@")[0] || profileDisplayName);
-  const avatarLetter = (profileDisplayName.trim()[0] || "B").toUpperCase();
+  const profileDisplayName = profile?.display_name || deriveNameFromEmail(user?.email || "bev user");
+  const profileHandle = profile?.handle || safeHandle(user?.email?.split("@")[0] || profileDisplayName);
+  const crewIds = new Set(crewMembers.map((member) => member.id));
   const crewUserIds = new Set([user?.id, ...crewMembers.map((member) => member.id)]);
   const myPosts = posts.filter((post) =>
     post.userId ? post.userId === user?.id : post.user === profileDisplayName
   );
-  const visiblePosts = posts.filter((post) => {
-    if (feedMode === "explore") return true;
+  const crewPosts = posts.filter((post) => {
     if (post.userId) return crewUserIds.has(post.userId);
     return post.user === profileDisplayName;
   });
@@ -232,11 +276,7 @@ export default function App() {
       if (nextSession?.user) {
         bootstrapUser(nextSession.user);
       } else {
-        setProfile(null);
-        setCrewMembers([]);
-        setPosts([]);
-        setLoading(false);
-        setAuthChecking(false);
+        resetSignedOutState();
       }
     });
 
@@ -246,6 +286,34 @@ export default function App() {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!profile) return;
+    setEditDisplayName(profile.display_name || "");
+    setEditHandle(profile.handle || "");
+    setEditAvatarUri(profile.avatar_url || "");
+  }, [profile?.id, profile?.display_name, profile?.handle, profile?.avatar_url]);
+
+  useEffect(() => {
+    if (!user || feedMode !== "explore") return;
+
+    const timer = setTimeout(() => {
+      loadDiscoverProfiles(discoverSearch);
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [user?.id, feedMode, discoverSearch, crewMembers.length]);
+
+  function resetSignedOutState() {
+    setProfile(null);
+    setCrewMembers([]);
+    setPosts([]);
+    setDiscoverProfiles([]);
+    setLoading(false);
+    setAuthChecking(false);
+    setActiveTab("Feed");
+    resetPostFlow();
+  }
 
   function toggleTheme() {
     setThemeMode(themeMode === "dark" ? "light" : "dark");
@@ -285,6 +353,7 @@ export default function App() {
       await ensureProfile(authUser);
       await loadCrew(authUser.id);
       await loadPosts();
+      await loadDiscoverProfiles("");
     } catch (error) {
       Alert.alert(
         "Setup needed",
@@ -319,7 +388,7 @@ export default function App() {
       authUser.user_metadata?.display_name ||
       authUser.user_metadata?.name ||
       deriveNameFromEmail(authUser.email);
-    const baseHandle = sanitizeHandle(
+    const baseHandle = safeHandle(
       authUser.user_metadata?.handle || authUser.email?.split("@")[0] || displayName
     );
 
@@ -359,9 +428,7 @@ export default function App() {
 
     const { data, error } = await supabase
       .from("crew_memberships")
-      .select(
-        "member_id, profiles!crew_memberships_member_id_fkey(id, display_name, handle, avatar_url)"
-      )
+      .select("member_id, profiles!crew_memberships_member_id_fkey(id, display_name, handle, avatar_url)")
       .eq("owner_id", currentUserId)
       .order("created_at", { ascending: true });
 
@@ -370,6 +437,39 @@ export default function App() {
     const members = (data || []).map((row) => row.profiles).filter(Boolean);
     setCrewMembers(members);
     return members;
+  }
+
+  async function loadDiscoverProfiles(searchText = discoverSearch) {
+    if (!user?.id) return;
+
+    setDiscoverLoading(true);
+
+    try {
+      const cleanedSearch = String(searchText || "")
+        .trim()
+        .replace(/[%(),]/g, "")
+        .slice(0, 32);
+
+      let query = supabase
+        .from("profiles")
+        .select("id, display_name, handle, avatar_url, created_at")
+        .neq("id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(30);
+
+      if (cleanedSearch) {
+        query = query.or(`display_name.ilike.%${cleanedSearch}%,handle.ilike.%${cleanedSearch}%`);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      setDiscoverProfiles(data || []);
+    } catch (error) {
+      Alert.alert("Explore error", error.message || "Could not load people.");
+    }
+
+    setDiscoverLoading(false);
   }
 
   async function loadPosts() {
@@ -445,7 +545,7 @@ export default function App() {
     const cleanEmail = authEmail.trim();
     const cleanPassword = authPassword.trim();
     const cleanDisplayName = authDisplayName.trim();
-    const cleanHandle = sanitizeHandle(authHandle || cleanDisplayName || cleanEmail.split("@")[0]);
+    const cleanHandle = safeHandle(authHandle || cleanDisplayName || cleanEmail.split("@")[0]);
     const isSignup = authMode === "signup";
 
     if (!cleanEmail || !cleanPassword) {
@@ -508,17 +608,13 @@ export default function App() {
 
   async function signOut() {
     await supabase.auth.signOut();
-    resetPostFlow();
-    setProfile(null);
-    setCrewMembers([]);
-    setPosts([]);
-    setActiveTab("Feed");
+    resetSignedOutState();
   }
 
-  async function uploadImageToSupabase(uri) {
+  async function uploadImageToSupabase(uri, prefix = "bev") {
     const fileExt = uri.split(".").pop()?.split("?")[0] || "jpg";
     const contentType = fileExt.toLowerCase() === "png" ? "image/png" : "image/jpeg";
-    const fileName = `bev-${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
+    const fileName = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
     const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
 
     const { error } = await supabase.storage
@@ -576,6 +672,82 @@ export default function App() {
     });
 
     if (!result.canceled) setImageUri(result.assets[0].uri);
+  }
+
+  async function pickAvatarImage() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert("Permission needed", "Photo access is needed to pick a profile photo.");
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.85,
+    });
+
+    if (!result.canceled) setEditAvatarUri(result.assets[0].uri);
+  }
+
+  async function saveProfileEdits() {
+    if (!user) return;
+
+    const cleanName = editDisplayName.trim();
+    const cleanHandle = normalizeHandle(editHandle);
+
+    if (!cleanName) {
+      Alert.alert("Missing name", "Add a display name.");
+      return;
+    }
+
+    if (cleanHandle.length < 3) {
+      Alert.alert("Handle too short", "Use at least 3 letters, numbers, or underscores.");
+      return;
+    }
+
+    setProfileSaving(true);
+
+    try {
+      let avatarUrl = editAvatarUri || null;
+
+      if (editAvatarUri && editAvatarUri !== profile?.avatar_url && !editAvatarUri.startsWith("http")) {
+        avatarUrl = await uploadImageToSupabase(editAvatarUri, "avatar");
+      }
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .update({
+          display_name: cleanName,
+          handle: cleanHandle,
+          avatar_url: avatarUrl,
+        })
+        .eq("id", user.id)
+        .select("*")
+        .single();
+
+      if (error) throw error;
+
+      await supabase
+        .from("posts")
+        .update({ user_name: cleanName })
+        .eq("user_id", user.id);
+
+      setProfile(data);
+      setEditProfileOpen(false);
+      await loadPosts();
+      showToast("Profile updated");
+    } catch (error) {
+      if (error.code === "23505") {
+        Alert.alert("Handle taken", "Try a different handle.");
+      } else {
+        Alert.alert("Profile error", error.message || "Could not update your profile.");
+      }
+    }
+
+    setProfileSaving(false);
   }
 
   async function startScanner() {
@@ -639,7 +811,7 @@ export default function App() {
     setSaving(true);
 
     try {
-      const uploadedImageUrl = await uploadImageToSupabase(imageUri);
+      const uploadedImageUrl = await uploadImageToSupabase(imageUri, "bev");
 
       const { error } = await supabase.from("posts").insert({
         user_id: user.id,
@@ -773,8 +945,36 @@ export default function App() {
     }
   }
 
+  async function addCrewMemberByProfile(memberProfile) {
+    if (!memberProfile?.id || !user) return;
+
+    if (memberProfile.id === user.id) {
+      showToast("That is you");
+      return;
+    }
+
+    if (crewIds.has(memberProfile.id)) {
+      showToast("Already in crew");
+      return;
+    }
+
+    const { error } = await supabase.from("crew_memberships").insert({
+      owner_id: user.id,
+      member_id: memberProfile.id,
+    });
+
+    if (error && error.code !== "23505") {
+      Alert.alert("Crew error", error.message);
+      return;
+    }
+
+    await loadCrew(user.id);
+    await loadDiscoverProfiles(discoverSearch);
+    showToast(error?.code === "23505" ? "Already in crew" : "Added to crew");
+  }
+
   async function addCrewMember() {
-    const handle = sanitizeHandle(crewHandleDraft);
+    const handle = normalizeHandle(crewHandleDraft);
     if (!handle || !user) return;
 
     setCrewSaving(true);
@@ -797,27 +997,8 @@ export default function App() {
       return;
     }
 
-    if (foundProfile.id === user.id) {
-      setCrewSaving(false);
-      showToast("That is you");
-      return;
-    }
-
-    const { error } = await supabase.from("crew_memberships").insert({
-      owner_id: user.id,
-      member_id: foundProfile.id,
-    });
-
-    if (error && error.code !== "23505") {
-      setCrewSaving(false);
-      Alert.alert("Crew error", error.message);
-      return;
-    }
-
+    await addCrewMemberByProfile(foundProfile);
     setCrewHandleDraft("");
-    await loadCrew(user.id);
-    await loadPosts();
-    showToast(error?.code === "23505" ? "Already in crew" : "Added to crew");
     setCrewSaving(false);
   }
 
@@ -836,6 +1017,7 @@ export default function App() {
     }
 
     await loadCrew(user.id);
+    await loadDiscoverProfiles(discoverSearch);
     await loadPosts();
     showToast("Removed from crew");
   }
@@ -891,18 +1073,14 @@ export default function App() {
                 style={[styles.segmentButton, !isSignup && styles.segmentButtonActive]}
                 onPress={() => setAuthMode("login")}
               >
-                <Text style={[styles.segmentText, !isSignup && styles.segmentTextActive]}>
-                  Login
-                </Text>
+                <Text style={[styles.segmentText, !isSignup && styles.segmentTextActive]}>Login</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
                 style={[styles.segmentButton, isSignup && styles.segmentButtonActive]}
                 onPress={() => setAuthMode("signup")}
               >
-                <Text style={[styles.segmentText, isSignup && styles.segmentTextActive]}>
-                  Signup
-                </Text>
+                <Text style={[styles.segmentText, isSignup && styles.segmentTextActive]}>Signup</Text>
               </TouchableOpacity>
             </View>
 
@@ -963,44 +1141,6 @@ export default function App() {
     );
   }
 
-  function renderStepHeader() {
-    return (
-      <View style={styles.stepWrap}>
-        {STEPS.map((step, index) => (
-          <View key={step} style={styles.stepItem}>
-            <View style={[styles.stepDot, index <= postStep && styles.stepDotActive]}>
-              <Text style={[styles.stepNumber, index <= postStep && styles.stepNumberActive]}>
-                {index + 1}
-              </Text>
-            </View>
-            <Text style={[styles.stepLabel, index === postStep && styles.stepLabelActive]}>
-              {step}
-            </Text>
-          </View>
-        ))}
-      </View>
-    );
-  }
-
-  function renderPostButtons() {
-    const primaryDisabled = saving || !isStepReady();
-
-    return (
-      <View style={styles.buttonRow}>
-        {renderButton(postStep > 0 ? "Back" : "Clear", postStep > 0 ? () => setPostStep(postStep - 1) : resetPostFlow, {
-          variant: "secondary",
-          disabled: saving,
-          style: styles.flexButton,
-        })}
-
-        {renderButton(postStep < STEPS.length - 1 ? "Next" : saving ? "Posting..." : "Post Bev", postStep < STEPS.length - 1 ? goNext : postBev, {
-          disabled: primaryDisabled,
-          style: styles.flexButton,
-        })}
-      </View>
-    );
-  }
-
   function renderFeedModeTabs() {
     return (
       <View style={styles.segmentedControl}>
@@ -1039,15 +1179,18 @@ export default function App() {
         keyboardShouldPersistTaps="handled"
       >
         {renderFeedModeTabs()}
+        {feedMode === "crew" ? renderCrewFeed() : renderExploreFeed()}
+      </ScrollView>
+    );
+  }
 
+  function renderCrewFeed() {
+    return (
+      <>
         <View style={styles.heroCard}>
           <View style={styles.heroTextWrap}>
-            <Text style={styles.heroTitle}>{feedMode === "crew" ? "Crew Feed" : "Explore"}</Text>
-            <Text style={styles.heroText}>
-              {feedMode === "crew"
-                ? "Posts from you and your crew."
-                : "A wider feed for new drinks and people later."}
-            </Text>
+            <Text style={styles.heroTitle}>Crew Feed</Text>
+            <Text style={styles.heroText}>Posts from you and your crew.</Text>
           </View>
 
           <TouchableOpacity style={styles.heroButton} onPress={() => setActiveTab("Post")}>
@@ -1055,19 +1198,94 @@ export default function App() {
           </TouchableOpacity>
         </View>
 
-        {visiblePosts.length === 0 ? (
+        {crewPosts.length === 0 ? (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>No posts here yet</Text>
-            <Text style={styles.mutedText}>
-              {feedMode === "crew"
-                ? "Post a drink or add someone by handle."
-                : "Explore will fill up as more people join."}
-            </Text>
+            <Text style={styles.cardTitle}>No crew posts yet</Text>
+            <Text style={styles.mutedText}>Post a drink or add someone by handle.</Text>
           </View>
         ) : null}
 
-        {visiblePosts.map((post) => renderPostCard(post))}
-      </ScrollView>
+        {crewPosts.map((post) => renderPostCard(post))}
+      </>
+    );
+  }
+
+  function renderExploreFeed() {
+    const publicPosts = posts.slice(0, 12);
+
+    return (
+      <>
+        <View style={styles.heroCard}>
+          <View style={styles.heroTextWrap}>
+            <Text style={styles.heroTitle}>Explore</Text>
+            <Text style={styles.heroText}>Find people, add crew, and see what everyone is drinking.</Text>
+          </View>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Find people</Text>
+          <Text style={styles.cardHint}>Search by name or handle.</Text>
+
+          <View style={styles.exploreSearchRow}>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="search handles"
+              placeholderTextColor={theme.muted}
+              autoCapitalize="none"
+              value={discoverSearch}
+              onChangeText={setDiscoverSearch}
+            />
+            <TouchableOpacity style={styles.crewButton} onPress={() => loadDiscoverProfiles(discoverSearch)}>
+              <Text style={styles.crewButtonText}>Search</Text>
+            </TouchableOpacity>
+          </View>
+
+          {discoverLoading ? (
+            <View style={styles.inlineLoading}>
+              <ActivityIndicator color={theme.primary} />
+              <Text style={styles.mutedText}>Searching...</Text>
+            </View>
+          ) : null}
+
+          {!discoverLoading && discoverProfiles.length === 0 ? (
+            <Text style={styles.mutedText}>No people found yet.</Text>
+          ) : null}
+
+          {discoverProfiles.map((person) => {
+            const inCrew = crewIds.has(person.id);
+
+            return (
+              <View key={person.id} style={styles.profileListItem}>
+                <View style={styles.userRow}>
+                  <AvatarView uri={person.avatar_url} name={person.display_name} theme={theme} size={44} />
+                  <View style={styles.profileListText}>
+                    <Text style={styles.crewName}>{person.display_name}</Text>
+                    <Text style={styles.crewHandle}>@{person.handle}</Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.smallActionButton, inCrew && styles.smallActionButtonMuted]}
+                  onPress={() => addCrewMemberByProfile(person)}
+                  disabled={inCrew}
+                >
+                  <Text style={[styles.smallActionText, inCrew && styles.smallActionTextMuted]}>
+                    {inCrew ? "In crew" : "Add"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            );
+          })}
+        </View>
+
+        <Text style={styles.sectionLabel}>Public bev feed</Text>
+        {publicPosts.length === 0 ? (
+          <View style={styles.card}>
+            <Text style={styles.mutedText}>No public posts yet.</Text>
+          </View>
+        ) : null}
+        {publicPosts.map((post) => renderPostCard(post))}
+      </>
     );
   }
 
@@ -1077,9 +1295,12 @@ export default function App() {
     return (
       <View key={post.id} style={styles.postCard}>
         <View style={styles.cardTop}>
-          <View>
-            <Text style={styles.username}>{post.user}</Text>
-            <Text style={styles.metaText}>{post.date}</Text>
+          <View style={styles.userRow}>
+            <AvatarView uri={null} name={post.user} theme={theme} size={40} />
+            <View>
+              <Text style={styles.username}>{post.user}</Text>
+              <Text style={styles.metaText}>{post.date}</Text>
+            </View>
           </View>
 
           <View style={styles.categoryPill}>
@@ -1160,6 +1381,42 @@ export default function App() {
     );
   }
 
+  function renderStepHeader() {
+    return (
+      <View style={styles.stepWrap}>
+        {STEPS.map((step, index) => (
+          <View key={step} style={styles.stepItem}>
+            <View style={[styles.stepDot, index <= postStep && styles.stepDotActive]}>
+              <Text style={[styles.stepNumber, index <= postStep && styles.stepNumberActive]}>
+                {index + 1}
+              </Text>
+            </View>
+            <Text style={[styles.stepLabel, index === postStep && styles.stepLabelActive]}>{step}</Text>
+          </View>
+        ))}
+      </View>
+    );
+  }
+
+  function renderPostButtons() {
+    const primaryDisabled = saving || !isStepReady();
+
+    return (
+      <View style={styles.buttonRow}>
+        {renderButton(postStep > 0 ? "Back" : "Clear", postStep > 0 ? () => setPostStep(postStep - 1) : resetPostFlow, {
+          variant: "secondary",
+          disabled: saving,
+          style: styles.flexButton,
+        })}
+
+        {renderButton(postStep < STEPS.length - 1 ? "Next" : saving ? "Posting..." : "Post Bev", postStep < STEPS.length - 1 ? goNext : postBev, {
+          disabled: primaryDisabled,
+          style: styles.flexButton,
+        })}
+      </View>
+    );
+  }
+
   function renderPostFlow() {
     if (customCameraOpen) {
       return (
@@ -1174,10 +1431,7 @@ export default function App() {
           </View>
 
           <View style={styles.cameraControls}>
-            <TouchableOpacity
-              style={styles.cameraCancelButton}
-              onPress={() => setCustomCameraOpen(false)}
-            >
+            <TouchableOpacity style={styles.cameraCancelButton} onPress={() => setCustomCameraOpen(false)}>
               <Text style={styles.cameraCancelText}>Cancel</Text>
             </TouchableOpacity>
 
@@ -1369,6 +1623,51 @@ export default function App() {
     );
   }
 
+  function renderProfile() {
+    return (
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+        <Text style={styles.screenTitle}>Profile</Text>
+        <Text style={styles.screenSubtitle}>Your bev stats and crew.</Text>
+
+        <View style={styles.profileCard}>
+          <AvatarView uri={profile?.avatar_url} name={profileDisplayName} theme={theme} size={96} />
+
+          <Text style={styles.profileName}>{profileDisplayName}</Text>
+          <Text style={styles.profileHandle}>@{profileHandle}</Text>
+          <Text style={styles.profileEmail}>{user?.email}</Text>
+
+          <View style={styles.statsRow}>
+            <View style={styles.statBox}>
+              <Text style={styles.statNumber}>{myPosts.length}</Text>
+              <Text style={styles.statLabel}>bevs</Text>
+            </View>
+
+            <View style={styles.statBox}>
+              <Text style={styles.statNumber}>{myPosts.length}</Text>
+              <Text style={styles.statLabel}>streak</Text>
+            </View>
+
+            <View style={styles.statBoxAccent}>
+              <Text style={styles.statNumber}>{crewMembers.length}</Text>
+              <Text style={styles.statLabel}>crew</Text>
+            </View>
+          </View>
+
+          <View style={styles.profileActionRow}>
+            {renderButton("Edit Profile", () => setEditProfileOpen(true), { style: styles.flexButton })}
+          </View>
+        </View>
+
+        {renderHistoryPreview()}
+        {renderCrewCard()}
+
+        <TouchableOpacity style={styles.signOutButton} onPress={signOut}>
+          <Text style={styles.signOutText}>Sign out</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
   function renderHistoryPreview() {
     return (
       <View style={styles.card}>
@@ -1407,49 +1706,6 @@ export default function App() {
     );
   }
 
-  function renderProfile() {
-    return (
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        <Text style={styles.screenTitle}>Profile</Text>
-        <Text style={styles.screenSubtitle}>Your bev stats and crew.</Text>
-
-        <View style={styles.profileCard}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{avatarLetter}</Text>
-          </View>
-
-          <Text style={styles.profileName}>{profileDisplayName}</Text>
-          <Text style={styles.profileHandle}>@{profileHandle}</Text>
-          <Text style={styles.profileEmail}>{user?.email}</Text>
-
-          <View style={styles.statsRow}>
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{myPosts.length}</Text>
-              <Text style={styles.statLabel}>bevs</Text>
-            </View>
-
-            <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{myPosts.length}</Text>
-              <Text style={styles.statLabel}>streak</Text>
-            </View>
-
-            <View style={styles.statBoxAccent}>
-              <Text style={styles.statNumber}>{crewMembers.length}</Text>
-              <Text style={styles.statLabel}>crew</Text>
-            </View>
-          </View>
-        </View>
-
-        {renderHistoryPreview()}
-        {renderCrewCard()}
-
-        <TouchableOpacity style={styles.signOutButton} onPress={signOut}>
-          <Text style={styles.signOutText}>Sign out</Text>
-        </TouchableOpacity>
-      </ScrollView>
-    );
-  }
-
   function renderCrewCard() {
     return (
       <View style={styles.card}>
@@ -1482,9 +1738,12 @@ export default function App() {
 
         {crewMembers.map((member) => (
           <View key={member.id} style={styles.crewListItem}>
-            <View>
-              <Text style={styles.crewName}>{member.display_name}</Text>
-              <Text style={styles.crewHandle}>@{member.handle}</Text>
+            <View style={styles.userRow}>
+              <AvatarView uri={member.avatar_url} name={member.display_name} theme={theme} size={40} />
+              <View>
+                <Text style={styles.crewName}>{member.display_name}</Text>
+                <Text style={styles.crewHandle}>@{member.handle}</Text>
+              </View>
             </View>
 
             <TouchableOpacity style={styles.removeButton} onPress={() => removeCrewMember(member.id)}>
@@ -1493,6 +1752,66 @@ export default function App() {
           </View>
         ))}
       </View>
+    );
+  }
+
+  function renderProfileEditor() {
+    return (
+      <Modal visible={editProfileOpen} transparent animationType="fade" onRequestClose={() => setEditProfileOpen(false)}>
+        <View style={styles.pickerBackdrop}>
+          <TouchableOpacity
+            style={styles.pickerBackdropPressTarget}
+            activeOpacity={1}
+            onPress={() => setEditProfileOpen(false)}
+          />
+
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            style={styles.editProfileCard}
+          >
+            <Text style={styles.cardTitle}>Edit Profile</Text>
+            <Text style={styles.cardHint}>Change your photo, name, or handle.</Text>
+
+            <View style={styles.editAvatarRow}>
+              <AvatarView uri={editAvatarUri} name={editDisplayName} theme={theme} size={78} />
+              <TouchableOpacity style={styles.smallActionButton} onPress={pickAvatarImage}>
+                <Text style={styles.smallActionText}>Change photo</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.inputLabel}>Display name</Text>
+            <TextInput
+              style={styles.input}
+              value={editDisplayName}
+              onChangeText={setEditDisplayName}
+              placeholder="Display name"
+              placeholderTextColor={theme.muted}
+            />
+
+            <Text style={styles.inputLabel}>Handle</Text>
+            <TextInput
+              style={styles.input}
+              value={editHandle}
+              onChangeText={setEditHandle}
+              placeholder="handle"
+              placeholderTextColor={theme.muted}
+              autoCapitalize="none"
+            />
+
+            <View style={styles.buttonRow}>
+              {renderButton("Cancel", () => setEditProfileOpen(false), {
+                variant: "secondary",
+                style: styles.flexButton,
+                disabled: profileSaving,
+              })}
+              {renderButton(profileSaving ? "Saving..." : "Save", saveProfileEdits, {
+                style: styles.flexButton,
+                disabled: profileSaving,
+              })}
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
     );
   }
 
@@ -1589,9 +1908,7 @@ export default function App() {
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.navSideButton} onPress={() => setActiveTab("Profile")}>
-          <Text style={[styles.navText, activeTab === "Profile" && styles.navTextActive]}>
-            Profile
-          </Text>
+          <Text style={[styles.navText, activeTab === "Profile" && styles.navTextActive]}>Profile</Text>
         </TouchableOpacity>
       </View>
     );
@@ -1658,6 +1975,7 @@ export default function App() {
         {renderToast()}
         {renderReactionPicker()}
         {renderCustomEmojiPicker()}
+        {renderProfileEditor()}
       </SafeAreaView>
     </GestureHandlerRootView>
   );
@@ -1793,6 +2111,12 @@ function createStyles(theme) {
       color: theme.muted,
       marginTop: 2,
       fontWeight: "700",
+    },
+    sectionLabel: {
+      color: theme.text,
+      fontSize: 17,
+      fontWeight: "900",
+      marginBottom: s.md,
     },
     heroCard: {
       backgroundColor: theme.primarySoft,
@@ -1934,6 +2258,13 @@ function createStyles(theme) {
       justifyContent: "space-between",
       alignItems: "center",
       marginBottom: s.md,
+      gap: s.sm,
+    },
+    userRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: s.md,
+      flex: 1,
     },
     username: {
       color: theme.text,
@@ -2068,6 +2399,64 @@ function createStyles(theme) {
       fontWeight: "900",
       fontSize: 18,
       marginLeft: 2,
+    },
+    exploreSearchRow: {
+      flexDirection: "row",
+      gap: s.sm,
+      alignItems: "center",
+      marginBottom: s.md,
+    },
+    searchInput: {
+      flex: 1,
+      minHeight: 44,
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: r.pill,
+      paddingHorizontal: s.lg,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    inlineLoading: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: s.sm,
+      marginBottom: s.md,
+    },
+    profileListItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      backgroundColor: theme.surface2,
+      borderRadius: r.lg,
+      padding: s.md,
+      marginTop: s.sm,
+      borderWidth: 1,
+      borderColor: theme.border,
+      gap: s.md,
+    },
+    profileListText: {
+      flex: 1,
+    },
+    smallActionButton: {
+      backgroundColor: theme.primary,
+      borderRadius: r.pill,
+      paddingHorizontal: s.md,
+      minHeight: 38,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    smallActionButtonMuted: {
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    smallActionText: {
+      color: "#0B0D0C",
+      fontWeight: "900",
+      fontSize: t.tiny,
+    },
+    smallActionTextMuted: {
+      color: theme.muted,
     },
     stepWrap: {
       flexDirection: "row",
@@ -2449,24 +2838,11 @@ function createStyles(theme) {
       borderColor: theme.border,
       marginBottom: s.lg,
     },
-    avatar: {
-      width: 92,
-      height: 92,
-      borderRadius: 46,
-      backgroundColor: theme.primary,
-      justifyContent: "center",
-      alignItems: "center",
-      marginBottom: s.md,
-    },
-    avatarText: {
-      color: "#0B0D0C",
-      fontSize: 40,
-      fontWeight: "900",
-    },
     profileName: {
       color: theme.text,
       fontSize: 26,
       fontWeight: "900",
+      marginTop: s.md,
     },
     profileHandle: {
       color: theme.muted,
@@ -2479,6 +2855,11 @@ function createStyles(theme) {
       marginBottom: s.xl,
       fontSize: t.tiny,
       fontWeight: "700",
+    },
+    profileActionRow: {
+      flexDirection: "row",
+      marginTop: s.lg,
+      width: "100%",
     },
     statsRow: {
       flexDirection: "row",
@@ -2563,6 +2944,7 @@ function createStyles(theme) {
       marginTop: s.sm,
       borderWidth: 1,
       borderColor: theme.border,
+      gap: s.md,
     },
     crewName: {
       color: theme.text,
@@ -2710,6 +3092,25 @@ function createStyles(theme) {
       borderColor: theme.border,
       fontSize: 22,
       marginTop: s.md,
+      marginBottom: s.lg,
+    },
+    editProfileCard: {
+      width: "100%",
+      maxWidth: 380,
+      backgroundColor: theme.surface,
+      borderRadius: r.card,
+      padding: s.xl,
+      borderWidth: 1,
+      borderColor: theme.border,
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 18,
+      elevation: 8,
+    },
+    editAvatarRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: s.md,
       marginBottom: s.lg,
     },
     bottomNav: {

@@ -9,8 +9,10 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./lib/supabase";
+import { getTheme, radius as r, spacing as s, typography as t } from "./designSystem";
 
 const ONBOARDING_VERSION = "v1";
+const theme = getTheme("dark");
 
 const steps = [
   {
@@ -47,11 +49,7 @@ export default function OnboardingOverlay() {
 
   const currentStep = steps[stepIndex];
   const isLastStep = stepIndex === steps.length - 1;
-
-  const progressLabel = useMemo(
-    () => `${stepIndex + 1} of ${steps.length}`,
-    [stepIndex]
-  );
+  const progressLabel = useMemo(() => `${stepIndex + 1} of ${steps.length}`, [stepIndex]);
 
   useEffect(() => {
     let mounted = true;
@@ -99,13 +97,7 @@ export default function OnboardingOverlay() {
     setStepIndex(0);
 
     const stored = await AsyncStorage.getItem(getStorageKey(nextUserId));
-
-    if (!stored) {
-      setVisible(true);
-    } else {
-      setVisible(false);
-    }
-
+    setVisible(!stored);
     setChecking(false);
   }
 
@@ -168,93 +160,95 @@ export default function OnboardingOverlay() {
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.72)",
+    backgroundColor: theme.overlay,
     justifyContent: "center",
-    padding: 22,
+    padding: s.xxl,
   },
   card: {
-    backgroundColor: "#151816",
-    borderRadius: 30,
-    padding: 22,
+    backgroundColor: theme.surface,
+    borderRadius: r.card,
+    padding: s.xxl,
     borderWidth: 1,
-    borderColor: "#2A302C",
+    borderColor: theme.border,
   },
   topRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 18,
+    marginBottom: s.xl,
   },
   eyebrow: {
-    color: "#8BFF5A",
-    fontSize: 13,
+    color: theme.primary,
+    fontSize: t.tiny,
     fontWeight: "900",
     textTransform: "uppercase",
     letterSpacing: 0.8,
   },
   progress: {
-    color: "#9EA79D",
+    color: theme.muted,
     fontWeight: "900",
-    fontSize: 12,
+    fontSize: t.tiny,
   },
   title: {
-    color: "#F4F7F2",
-    fontSize: 31,
-    lineHeight: 36,
+    color: theme.text,
+    fontSize: t.logo,
+    lineHeight: 37,
     fontWeight: "900",
     letterSpacing: -1.1,
-    marginBottom: 10,
+    marginBottom: s.md,
   },
   text: {
     color: "#C9D0C6",
-    fontSize: 16,
+    fontSize: t.body,
     lineHeight: 23,
     fontWeight: "700",
   },
   dotsRow: {
     flexDirection: "row",
-    gap: 8,
-    marginTop: 22,
-    marginBottom: 20,
+    gap: s.sm,
+    marginTop: s.xxl,
+    marginBottom: s.xl,
   },
   dot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: "#3A423C",
+    backgroundColor: theme.surface3,
   },
   dotActive: {
     width: 28,
-    backgroundColor: "#8BFF5A",
+    backgroundColor: theme.primary,
   },
   actionsRow: {
     flexDirection: "row",
-    gap: 10,
+    gap: s.md,
   },
   skipButton: {
     flex: 1,
-    backgroundColor: "#1F2420",
-    borderRadius: 18,
-    padding: 15,
+    minHeight: 48,
+    backgroundColor: theme.surface2,
+    borderRadius: r.lg,
     alignItems: "center",
+    justifyContent: "center",
     borderWidth: 1,
-    borderColor: "#2A302C",
+    borderColor: theme.border,
   },
   skipText: {
-    color: "#F4F7F2",
+    color: theme.text,
     fontWeight: "900",
-    fontSize: 16,
+    fontSize: t.body,
   },
   nextButton: {
     flex: 1,
-    backgroundColor: "#8BFF5A",
-    borderRadius: 18,
-    padding: 15,
+    minHeight: 48,
+    backgroundColor: theme.primary,
+    borderRadius: r.lg,
     alignItems: "center",
+    justifyContent: "center",
   },
   nextText: {
     color: "#0B0D0C",
     fontWeight: "900",
-    fontSize: 16,
+    fontSize: t.body,
   },
 });

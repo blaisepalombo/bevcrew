@@ -26,43 +26,13 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as FileSystem from "expo-file-system/legacy";
 import { decode } from "base64-arraybuffer";
 import { supabase } from "./lib/supabase";
+import { getTheme, layout, radius as r, spacing as s, typography as t } from "./designSystem";
 
 const DEFAULT_REACTION = "👍";
 const QUICK_REACTIONS = ["🔥", "💯", "😮", "🤢"];
 const RATINGS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"];
-
-const palettes = {
-  dark: {
-    mode: "dark",
-    bg: "#0B0D0C",
-    surface: "#151816",
-    surface2: "#1F2420",
-    text: "#F4F7F2",
-    muted: "#9EA79D",
-    border: "#2A302C",
-    primary: "#8BFF5A",
-    primarySoft: "#20331B",
-    accent: "#FF4F67",
-    accentSoft: "#331A20",
-    input: "#171B18",
-    tab: "#101311",
-  },
-  light: {
-    mode: "light",
-    bg: "#F7F8F3",
-    surface: "#FFFFFF",
-    surface2: "#EEF2EA",
-    text: "#121512",
-    muted: "#697166",
-    border: "#DCE2D7",
-    primary: "#4FD12F",
-    primarySoft: "#E7FADA",
-    accent: "#E8485C",
-    accentSoft: "#FFE5E8",
-    input: "#FFFFFF",
-    tab: "#FFFFFF",
-  },
-};
+const CATEGORIES = ["Energy", "Soda", "Coffee", "Water", "Other"];
+const STEPS = ["Photo", "Scan", "Post"];
 
 function emptyReactions() {
   return { [DEFAULT_REACTION]: 0, "🔥": 0, "💯": 0, "😮": 0, "🤢": 0 };
@@ -120,7 +90,7 @@ function PinchZoomImage({ uri, styles }) {
 
   const displayScale = pinchScale.interpolate({
     inputRange: [1, 2, 4],
-    outputRange: [1, 1.35, 2],
+    outputRange: [1, 1.32, 1.9],
     extrapolate: "clamp",
   });
 
@@ -141,7 +111,7 @@ function PinchZoomImage({ uri, styles }) {
       Animated.spring(pinchScale, {
         toValue: 1,
         useNativeDriver: true,
-        friction: 7,
+        friction: 8,
         tension: 80,
       }).start();
     }
@@ -166,7 +136,7 @@ function PinchZoomImage({ uri, styles }) {
 
 export default function App() {
   const [themeMode, setThemeMode] = useState("dark");
-  const theme = palettes[themeMode];
+  const theme = getTheme(themeMode);
   const styles = createStyles(theme);
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -229,15 +199,12 @@ export default function App() {
     if (post.userId) return crewUserIds.has(post.userId);
     return post.user === profileDisplayName;
   });
-  const categories = ["Energy", "Soda", "Coffee", "Water", "Other"];
-  const steps = ["Photo", "Scan", "Post"];
 
   useEffect(() => {
     let mounted = true;
 
     async function initAuth() {
       setAuthChecking(true);
-
       const { data, error } = await supabase.auth.getSession();
 
       if (!mounted) return;
@@ -316,17 +283,16 @@ export default function App() {
       setAuthChecking(true);
       setLoading(true);
       await ensureProfile(authUser);
-      const members = await loadCrew(authUser.id);
+      await loadCrew(authUser.id);
       await loadPosts();
-      setLoading(false);
     } catch (error) {
-      setLoading(false);
       Alert.alert(
         "Setup needed",
         error.message || "Could not load your account. Make sure the Supabase SQL setup has been run."
       );
     }
 
+    setLoading(false);
     setAuthChecking(false);
   }
 
@@ -357,51 +323,35 @@ export default function App() {
       authUser.user_metadata?.handle || authUser.email?.split("@")[0] || displayName
     );
 
-    const profileToInsert = {
-      id: authUser.id,
-      display_name: displayName,
-      handle: baseHandle,
-    };
-
-    let inserted = await supabase
+    let response = await supabase
       .from("profiles")
-      .insert(profileToInsert)
+      .insert({ id: authUser.id, display_name: displayName, handle: baseHandle })
       .select("*")
       .single();
 
-    if (inserted.error?.code === "23505") {
-      const message = `${inserted.error.message || ""} ${inserted.error.details || ""}`;
+    if (response.error?.code === "23505") {
+      const retryProfile = await fetchProfileById(authUser.id);
 
-      if (message.includes("profiles_pkey")) {
-        const retryProfile = await fetchProfileById(authUser.id);
-        if (retryProfile) {
-          setProfile(retryProfile);
-          return retryProfile;
-        }
+      if (retryProfile) {
+        setProfile(retryProfile);
+        return retryProfile;
       }
 
-      inserted = await supabase
+      response = await supabase
         .from("profiles")
         .insert({
-          ...profileToInsert,
+          id: authUser.id,
+          display_name: displayName,
           handle: `${baseHandle}${Math.floor(100 + Math.random() * 900)}`.slice(0, 24),
         })
         .select("*")
         .single();
-
-      if (inserted.error?.code === "23505") {
-        const retryProfile = await fetchProfileById(authUser.id);
-        if (retryProfile) {
-          setProfile(retryProfile);
-          return retryProfile;
-        }
-      }
     }
 
-    if (inserted.error) throw inserted.error;
+    if (response.error) throw response.error;
 
-    setProfile(inserted.data);
-    return inserted.data;
+    setProfile(response.data);
+    return response.data;
   }
 
   async function loadCrew(currentUserId = user?.id) {
@@ -491,19 +441,6 @@ export default function App() {
     setPosts(builtPosts);
   }
 
-  async function refreshEverything() {
-    if (!user) return;
-
-    setLoading(true);
-    try {
-      await loadCrew(user.id);
-      await loadPosts();
-    } catch (error) {
-      Alert.alert("Refresh failed", error.message);
-    }
-    setLoading(false);
-  }
-
   async function handleAuthSubmit() {
     const cleanEmail = authEmail.trim();
     const cleanPassword = authPassword.trim();
@@ -548,8 +485,8 @@ export default function App() {
           await bootstrapUser(data.session.user);
           showToast("Welcome to bevcrew");
         } else {
-          showToast("Check your email to confirm");
           setAuthMode("login");
+          showToast("Check your email to confirm");
         }
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({
@@ -572,17 +509,16 @@ export default function App() {
   async function signOut() {
     await supabase.auth.signOut();
     resetPostFlow();
-    setActiveTab("Feed");
     setProfile(null);
     setCrewMembers([]);
     setPosts([]);
+    setActiveTab("Feed");
   }
 
   async function uploadImageToSupabase(uri) {
     const fileExt = uri.split(".").pop()?.split("?")[0] || "jpg";
     const contentType = fileExt.toLowerCase() === "png" ? "image/png" : "image/jpeg";
     const fileName = `bev-${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
-
     const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
 
     const { error } = await supabase.storage
@@ -691,7 +627,7 @@ export default function App() {
 
   function goNext() {
     if (!isStepReady()) return;
-    if (postStep < steps.length - 1) setPostStep(postStep + 1);
+    if (postStep < STEPS.length - 1) setPostStep(postStep + 1);
   }
 
   async function postBev() {
@@ -904,12 +840,31 @@ export default function App() {
     showToast("Removed from crew");
   }
 
-  function renderToast() {
-    return toastMessage ? (
-      <View style={styles.toast} pointerEvents="none">
-        <Text style={styles.toastText}>{toastMessage}</Text>
-      </View>
-    ) : null;
+  function renderButton(label, onPress, options = {}) {
+    const { disabled = false, variant = "primary", style } = options;
+
+    return (
+      <TouchableOpacity
+        style={[
+          styles.button,
+          variant === "primary" ? styles.buttonPrimary : styles.buttonSecondary,
+          disabled && styles.buttonDisabled,
+          style,
+        ]}
+        onPress={onPress}
+        disabled={disabled}
+      >
+        <Text
+          style={[
+            styles.buttonText,
+            variant === "primary" ? styles.buttonTextPrimary : styles.buttonTextSecondary,
+            disabled && styles.buttonTextDisabled,
+          ]}
+        >
+          {label}
+        </Text>
+      </TouchableOpacity>
+    );
   }
 
   function renderAuthScreen() {
@@ -928,24 +883,24 @@ export default function App() {
           <Text style={styles.authLogo}>bevcrew</Text>
           <Text style={styles.authSubtitle}>daily bevs with friends</Text>
 
-          <View style={styles.authCard}>
-            <Text style={styles.authTitle}>{isSignup ? "Create account" : "Log in"}</Text>
+          <View style={styles.card}>
+            <Text style={styles.screenTitle}>{isSignup ? "Create account" : "Log in"}</Text>
 
-            <View style={styles.authModeRow}>
+            <View style={styles.segmentedControl}>
               <TouchableOpacity
-                style={[styles.authModeButton, !isSignup && styles.authModeButtonActive]}
+                style={[styles.segmentButton, !isSignup && styles.segmentButtonActive]}
                 onPress={() => setAuthMode("login")}
               >
-                <Text style={[styles.authModeText, !isSignup && styles.authModeTextActive]}>
+                <Text style={[styles.segmentText, !isSignup && styles.segmentTextActive]}>
                   Login
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.authModeButton, isSignup && styles.authModeButtonActive]}
+                style={[styles.segmentButton, isSignup && styles.segmentButtonActive]}
                 onPress={() => setAuthMode("signup")}
               >
-                <Text style={[styles.authModeText, isSignup && styles.authModeTextActive]}>
+                <Text style={[styles.segmentText, isSignup && styles.segmentTextActive]}>
                   Signup
                 </Text>
               </TouchableOpacity>
@@ -995,20 +950,9 @@ export default function App() {
               onChangeText={setAuthPassword}
             />
 
-            <TouchableOpacity
-              style={[styles.primaryButton, authSaving && styles.primaryButtonDisabled]}
-              onPress={handleAuthSubmit}
-              disabled={authSaving}
-            >
-              <Text
-                style={[
-                  styles.primaryButtonText,
-                  authSaving && styles.primaryButtonTextDisabled,
-                ]}
-              >
-                {authSaving ? "Working..." : isSignup ? "Create account" : "Log in"}
-              </Text>
-            </TouchableOpacity>
+            {renderButton(authSaving ? "Working..." : isSignup ? "Create account" : "Log in", handleAuthSubmit, {
+              disabled: authSaving,
+            })}
 
             <Text style={styles.authFooterText}>
               {isSignup ? "Already have an account? Tap Login." : "New here? Tap Signup."}
@@ -1022,7 +966,7 @@ export default function App() {
   function renderStepHeader() {
     return (
       <View style={styles.stepWrap}>
-        {steps.map((step, index) => (
+        {STEPS.map((step, index) => (
           <View key={step} style={styles.stepItem}>
             <View style={[styles.stepDot, index <= postStep && styles.stepDotActive]}>
               <Text style={[styles.stepNumber, index <= postStep && styles.stepNumberActive]}>
@@ -1042,78 +986,38 @@ export default function App() {
     const primaryDisabled = saving || !isStepReady();
 
     return (
-      <View style={styles.wizardButtons}>
-        {postStep > 0 ? (
-          <TouchableOpacity
-            style={styles.secondaryButton}
-            onPress={() => setPostStep(postStep - 1)}
-            disabled={saving}
-          >
-            <Text style={styles.secondaryButtonText}>Back</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity style={styles.secondaryButton} onPress={resetPostFlow} disabled={saving}>
-            <Text style={styles.secondaryButtonText}>Clear</Text>
-          </TouchableOpacity>
-        )}
+      <View style={styles.buttonRow}>
+        {renderButton(postStep > 0 ? "Back" : "Clear", postStep > 0 ? () => setPostStep(postStep - 1) : resetPostFlow, {
+          variant: "secondary",
+          disabled: saving,
+          style: styles.flexButton,
+        })}
 
-        {postStep < steps.length - 1 ? (
-          <TouchableOpacity
-            style={[styles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
-            onPress={goNext}
-            disabled={primaryDisabled}
-          >
-            <Text
-              style={[
-                styles.primaryButtonText,
-                primaryDisabled && styles.primaryButtonTextDisabled,
-              ]}
-            >
-              Next
-            </Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity
-            style={[styles.primaryButton, primaryDisabled && styles.primaryButtonDisabled]}
-            onPress={postBev}
-            disabled={primaryDisabled}
-          >
-            <Text
-              style={[
-                styles.primaryButtonText,
-                primaryDisabled && styles.primaryButtonTextDisabled,
-              ]}
-            >
-              {saving ? "Posting..." : "Post Bev"}
-            </Text>
-          </TouchableOpacity>
-        )}
+        {renderButton(postStep < STEPS.length - 1 ? "Next" : saving ? "Posting..." : "Post Bev", postStep < STEPS.length - 1 ? goNext : postBev, {
+          disabled: primaryDisabled,
+          style: styles.flexButton,
+        })}
       </View>
     );
   }
 
   function renderFeedModeTabs() {
     return (
-      <View style={styles.feedModeTabs}>
-        <TouchableOpacity
-          style={[styles.feedModeButton, feedMode === "crew" && styles.feedModeButtonActive]}
-          onPress={() => setFeedMode("crew")}
-        >
-          <Text style={[styles.feedModeText, feedMode === "crew" && styles.feedModeTextActive]}>
-            Crew
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.feedModeButton, feedMode === "explore" && styles.feedModeButtonActive]}
-          onPress={() => setFeedMode("explore")}
-        >
-          <Text
-            style={[styles.feedModeText, feedMode === "explore" && styles.feedModeTextActive]}
+      <View style={styles.segmentedControl}>
+        {[
+          ["crew", "Crew"],
+          ["explore", "Explore"],
+        ].map(([value, label]) => (
+          <TouchableOpacity
+            key={value}
+            style={[styles.segmentButton, feedMode === value && styles.segmentButtonActive]}
+            onPress={() => setFeedMode(value)}
           >
-            Explore
-          </Text>
-        </TouchableOpacity>
+            <Text style={[styles.segmentText, feedMode === value && styles.segmentTextActive]}>
+              {label}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
     );
   }
@@ -1142,7 +1046,7 @@ export default function App() {
             <Text style={styles.heroText}>
               {feedMode === "crew"
                 ? "Posts from you and your crew."
-                : "Find new bevs and people to follow later."}
+                : "A wider feed for new drinks and people later."}
             </Text>
           </View>
 
@@ -1152,108 +1056,107 @@ export default function App() {
         </View>
 
         {visiblePosts.length === 0 ? (
-          <View style={styles.feedCard}>
-            <Text style={styles.bevName}>No posts here yet</Text>
-            <Text style={styles.flavorName}>
-              {feedMode === "crew" ? "Post a drink or add someone by handle." : "Explore will fill up as more people join."}
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>No posts here yet</Text>
+            <Text style={styles.mutedText}>
+              {feedMode === "crew"
+                ? "Post a drink or add someone by handle."
+                : "Explore will fill up as more people join."}
             </Text>
           </View>
         ) : null}
 
-        {visiblePosts.map((post) => {
-          const visibleReactions = getVisibleReactionEntries(post.reactions);
-
-          return (
-            <View key={post.id} style={styles.feedCard}>
-              <View style={styles.cardTop}>
-                <View>
-                  <Text style={styles.username}>{post.user}</Text>
-                  <Text style={styles.date}>{post.date}</Text>
-                </View>
-
-                <View style={styles.categoryPill}>
-                  <Text style={styles.categoryPillText}>{post.category}</Text>
-                </View>
-              </View>
-
-              {post.imageUri ? (
-                <PinchZoomImage uri={post.imageUri} styles={styles} />
-              ) : (
-                <View style={styles.placeholderPortrait}>
-                  <Text style={styles.photoText}>4:5 bev photo</Text>
-                </View>
-              )}
-
-              <Text style={styles.bevName}>{post.brand}</Text>
-              <Text style={styles.flavorName}>{post.flavor}</Text>
-
-              <View style={styles.metaRow}>
-                <Text style={styles.rating}>Rating: {formatRating(post.rating)}</Text>
-              </View>
-
-              {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
-
-              <ScrollView
-                horizontal
-                style={styles.reactionScroll}
-                contentContainerStyle={styles.reactionScrollContent}
-                showsHorizontalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled"
-              >
-                <TouchableOpacity
-                  style={styles.defaultReactionButton}
-                  onPress={() => handleDefaultReactionPress(post.id)}
-                  onLongPress={() => openReactionPicker(post.id)}
-                  delayLongPress={300}
-                >
-                  <Text style={styles.defaultReactionText}>
-                    {DEFAULT_REACTION} {post.reactions?.[DEFAULT_REACTION] || 0}
-                  </Text>
-                </TouchableOpacity>
-
-                {visibleReactions.map(([emoji, count]) => (
-                  <TouchableOpacity
-                    key={emoji}
-                    style={styles.reactionChip}
-                    onPress={() => reactToPost(post.id, emoji)}
-                  >
-                    <Text style={styles.reactionChipText}>
-                      {emoji} {count}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-
-              {post.comments.length > 0 ? (
-                <View style={styles.commentsBox}>
-                  {post.comments.map((comment) => (
-                    <Text key={comment.id} style={styles.commentText}>
-                      <Text style={styles.commentUser}>{comment.user}: </Text>
-                      {comment.text}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-
-              <View style={styles.commentRow}>
-                <TextInput
-                  style={styles.commentInput}
-                  placeholder="comment"
-                  placeholderTextColor={theme.muted}
-                  value={commentDrafts[post.id] || ""}
-                  onChangeText={(text) =>
-                    setCommentDrafts({ ...commentDrafts, [post.id]: text })
-                  }
-                />
-
-                <TouchableOpacity style={styles.commentButton} onPress={() => addComment(post.id)}>
-                  <Text style={styles.commentButtonText}>➤</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          );
-        })}
+        {visiblePosts.map((post) => renderPostCard(post))}
       </ScrollView>
+    );
+  }
+
+  function renderPostCard(post) {
+    const visibleReactions = getVisibleReactionEntries(post.reactions);
+
+    return (
+      <View key={post.id} style={styles.postCard}>
+        <View style={styles.cardTop}>
+          <View>
+            <Text style={styles.username}>{post.user}</Text>
+            <Text style={styles.metaText}>{post.date}</Text>
+          </View>
+
+          <View style={styles.categoryPill}>
+            <Text style={styles.categoryPillText}>{post.category}</Text>
+          </View>
+        </View>
+
+        {post.imageUri ? (
+          <PinchZoomImage uri={post.imageUri} styles={styles} />
+        ) : (
+          <View style={styles.placeholderPortrait}>
+            <Text style={styles.mutedText}>4:5 bev photo</Text>
+          </View>
+        )}
+
+        <Text style={styles.bevName}>{post.brand}</Text>
+        <Text style={styles.flavorName}>{post.flavor}</Text>
+        <Text style={styles.ratingText}>Rating: {formatRating(post.rating)}</Text>
+
+        {post.caption ? <Text style={styles.caption}>{post.caption}</Text> : null}
+
+        <ScrollView
+          horizontal
+          style={styles.reactionScroll}
+          contentContainerStyle={styles.reactionScrollContent}
+          showsHorizontalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          <TouchableOpacity
+            style={styles.reactionButton}
+            onPress={() => handleDefaultReactionPress(post.id)}
+            onLongPress={() => openReactionPicker(post.id)}
+            delayLongPress={300}
+          >
+            <Text style={styles.reactionText}>
+              {DEFAULT_REACTION} {post.reactions?.[DEFAULT_REACTION] || 0}
+            </Text>
+          </TouchableOpacity>
+
+          {visibleReactions.map(([emoji, count]) => (
+            <TouchableOpacity
+              key={emoji}
+              style={styles.reactionButton}
+              onPress={() => reactToPost(post.id, emoji)}
+            >
+              <Text style={styles.reactionText}>
+                {emoji} {count}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {post.comments.length > 0 ? (
+          <View style={styles.commentsBox}>
+            {post.comments.map((comment) => (
+              <Text key={comment.id} style={styles.commentText}>
+                <Text style={styles.commentUser}>{comment.user}: </Text>
+                {comment.text}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+
+        <View style={styles.commentRow}>
+          <TextInput
+            style={styles.commentInput}
+            placeholder="comment"
+            placeholderTextColor={theme.muted}
+            value={commentDrafts[post.id] || ""}
+            onChangeText={(text) => setCommentDrafts({ ...commentDrafts, [post.id]: text })}
+          />
+
+          <TouchableOpacity style={styles.commentButton} onPress={() => addComment(post.id)}>
+            <Text style={styles.commentButtonText}>➤</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
     );
   }
 
@@ -1292,7 +1195,7 @@ export default function App() {
       return (
         <View style={styles.scannerScreen}>
           <CameraView
-            style={styles.camera}
+            style={styles.cameraPreview}
             facing="back"
             onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
             barcodeScannerSettings={{ barcodeTypes: ["ean13", "ean8", "upc_a", "upc_e"] }}
@@ -1321,145 +1224,9 @@ export default function App() {
 
           {renderStepHeader()}
 
-          {postStep === 0 && (
-            <View style={styles.wizardCard}>
-              <Text style={styles.cardTitle}>Add photo</Text>
-              <Text style={styles.cardHint}>Frame it in 4:5 and snap.</Text>
-
-              <View style={styles.photoCompactCard}>
-                {imageUri ? (
-                  <Image source={{ uri: imageUri }} style={styles.photoThumbnail} />
-                ) : (
-                  <View style={styles.photoThumbnailEmpty}>
-                    <Text style={styles.photoThumbnailIcon}>＋</Text>
-                  </View>
-                )}
-
-                <View style={styles.photoActionArea}>
-                  <Text style={styles.photoStatus}>{imageUri ? "Photo ready" : "No photo yet"}</Text>
-                  <Text style={styles.photoSubtext}>
-                    {imageUri ? "Retake or keep going." : "Use the feed shape."}
-                  </Text>
-
-                  <View style={styles.photoButtonRow}>
-                    <TouchableOpacity style={styles.compactPrimary} onPress={takePhoto}>
-                      <Text style={styles.compactPrimaryText}>
-                        {imageUri ? "Retake" : "Take photo"}
-                      </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity style={styles.compactSecondary} onPress={pickImage}>
-                      <Text style={styles.compactSecondaryText}>Library</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            </View>
-          )}
-
-          {postStep === 1 && (
-            <View style={styles.wizardCard}>
-              <Text style={styles.cardTitle}>Drink details</Text>
-              <Text style={styles.cardHint}>Scan it, or type it manually.</Text>
-
-              <TouchableOpacity style={styles.scanButton} onPress={startScanner}>
-                <Text style={styles.scanButtonText}>Scan barcode</Text>
-              </TouchableOpacity>
-
-              <Text style={styles.manualHint}>No barcode match? Just fill it in below.</Text>
-              {barcode ? <Text style={styles.lookupText}>Barcode: {barcode}</Text> : null}
-              {lookupStatus ? <Text style={styles.lookupText}>{lookupStatus}</Text> : null}
-
-              <Text style={styles.inputLabel}>Brand</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Ghost, Monster, Celsius..."
-                placeholderTextColor={theme.muted}
-                value={brand}
-                onChangeText={setBrand}
-              />
-
-              <Text style={styles.inputLabel}>Drink / Flavor</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Sour Patch Blue Raspberry"
-                placeholderTextColor={theme.muted}
-                value={flavor}
-                onChangeText={setFlavor}
-              />
-
-              <Text style={styles.inputLabel}>Category</Text>
-              <View style={styles.chipRow}>
-                {categories.map((item) => (
-                  <TouchableOpacity
-                    key={item}
-                    style={[styles.chip, category === item && styles.chipActive]}
-                    onPress={() => setCategory(item)}
-                  >
-                    <Text style={[styles.chipText, category === item && styles.chipTextActive]}>
-                      {item}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-          )}
-
-          {postStep === 2 && (
-            <View style={styles.wizardCard}>
-              <Text style={styles.cardTitle}>Rate and post</Text>
-              <Text style={styles.cardHint}>Pick a rating. Caption is optional.</Text>
-
-              <View style={styles.reviewSummaryCard}>
-                {imageUri ? <Image source={{ uri: imageUri }} style={styles.reviewThumbnail} /> : null}
-
-                <View style={styles.reviewTextWrap}>
-                  <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
-                  <Text style={styles.reviewFlavor}>{flavor || "Flavor"}</Text>
-                  <Text style={styles.reviewCategory}>{category}</Text>
-                </View>
-              </View>
-
-              <View style={styles.ratingHeaderRow}>
-                <Text style={styles.inputLabel}>Rating</Text>
-                <Text style={styles.ratingSelected}>{rating ? `${rating}/10` : "pick one"}</Text>
-              </View>
-
-              <View style={styles.ratingGrid}>
-                {RATINGS.map((num) => (
-                  <TouchableOpacity
-                    key={num}
-                    style={[styles.ratingBubble, rating === num && styles.ratingBubbleActive]}
-                    onPress={() => setRating(num)}
-                  >
-                    <Text
-                      style={[
-                        styles.ratingBubbleText,
-                        rating === num && styles.ratingBubbleTextActive,
-                      ]}
-                    >
-                      {num}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <View style={styles.ratingGuideRow}>
-                <Text style={styles.ratingGuideText}>1 rough</Text>
-                <Text style={styles.ratingGuideText}>10 elite</Text>
-              </View>
-
-              <Text style={styles.inputLabel}>Caption</Text>
-              <TextInput
-                style={[styles.input, styles.captionInput]}
-                placeholder="rare find, elite, mid..."
-                placeholderTextColor={theme.muted}
-                value={caption}
-                onChangeText={setCaption}
-                multiline
-              />
-            </View>
-          )}
+          {postStep === 0 && renderPhotoStep()}
+          {postStep === 1 && renderDetailsStep()}
+          {postStep === 2 && renderRatingStep()}
 
           {renderPostButtons()}
         </ScrollView>
@@ -1467,10 +1234,145 @@ export default function App() {
     );
   }
 
+  function renderPhotoStep() {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Add photo</Text>
+        <Text style={styles.cardHint}>Frame it in 4:5 and snap.</Text>
+
+        <View style={styles.photoCompactCard}>
+          {imageUri ? (
+            <Image source={{ uri: imageUri }} style={styles.photoThumbnail} />
+          ) : (
+            <View style={styles.photoThumbnailEmpty}>
+              <Text style={styles.photoThumbnailIcon}>＋</Text>
+            </View>
+          )}
+
+          <View style={styles.photoActionArea}>
+            <Text style={styles.photoStatus}>{imageUri ? "Photo ready" : "No photo yet"}</Text>
+            <Text style={styles.photoSubtext}>
+              {imageUri ? "Retake or keep going." : "Use the feed shape."}
+            </Text>
+
+            <View style={styles.compactButtonRow}>
+              <TouchableOpacity style={styles.compactPrimary} onPress={takePhoto}>
+                <Text style={styles.compactPrimaryText}>{imageUri ? "Retake" : "Take photo"}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.compactSecondary} onPress={pickImage}>
+                <Text style={styles.compactSecondaryText}>Library</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
+  function renderDetailsStep() {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Drink details</Text>
+        <Text style={styles.cardHint}>Scan it, or type it manually.</Text>
+
+        {renderButton("Scan barcode", startScanner)}
+
+        <Text style={styles.manualHint}>No barcode match? Just fill it in below.</Text>
+        {barcode ? <Text style={styles.lookupText}>Barcode: {barcode}</Text> : null}
+        {lookupStatus ? <Text style={styles.lookupText}>{lookupStatus}</Text> : null}
+
+        <Text style={styles.inputLabel}>Brand</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Ghost, Monster, Celsius..."
+          placeholderTextColor={theme.muted}
+          value={brand}
+          onChangeText={setBrand}
+        />
+
+        <Text style={styles.inputLabel}>Drink / Flavor</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Sour Patch Blue Raspberry"
+          placeholderTextColor={theme.muted}
+          value={flavor}
+          onChangeText={setFlavor}
+        />
+
+        <Text style={styles.inputLabel}>Category</Text>
+        <View style={styles.chipRow}>
+          {CATEGORIES.map((item) => (
+            <TouchableOpacity
+              key={item}
+              style={[styles.chip, category === item && styles.chipActive]}
+              onPress={() => setCategory(item)}
+            >
+              <Text style={[styles.chipText, category === item && styles.chipTextActive]}>{item}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+    );
+  }
+
+  function renderRatingStep() {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Rate and post</Text>
+        <Text style={styles.cardHint}>Pick a rating. Caption is optional.</Text>
+
+        <View style={styles.reviewSummaryCard}>
+          {imageUri ? <Image source={{ uri: imageUri }} style={styles.reviewThumbnail} /> : null}
+
+          <View style={styles.reviewTextWrap}>
+            <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
+            <Text style={styles.reviewFlavor}>{flavor || "Flavor"}</Text>
+            <Text style={styles.reviewCategory}>{category}</Text>
+          </View>
+        </View>
+
+        <View style={styles.ratingHeaderRow}>
+          <Text style={styles.inputLabel}>Rating</Text>
+          <Text style={styles.ratingSelected}>{rating ? `${rating}/10` : "pick one"}</Text>
+        </View>
+
+        <View style={styles.ratingGrid}>
+          {RATINGS.map((num) => (
+            <TouchableOpacity
+              key={num}
+              style={[styles.ratingBubble, rating === num && styles.ratingBubbleActive]}
+              onPress={() => setRating(num)}
+            >
+              <Text style={[styles.ratingBubbleText, rating === num && styles.ratingBubbleTextActive]}>
+                {num}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.ratingGuideRow}>
+          <Text style={styles.ratingGuideText}>1 rough</Text>
+          <Text style={styles.ratingGuideText}>10 elite</Text>
+        </View>
+
+        <Text style={styles.inputLabel}>Caption</Text>
+        <TextInput
+          style={[styles.input, styles.captionInput]}
+          placeholder="rare find, elite, mid..."
+          placeholderTextColor={theme.muted}
+          value={caption}
+          onChangeText={setCaption}
+          multiline
+        />
+      </View>
+    );
+  }
+
   function renderHistoryPreview() {
     return (
-      <View style={styles.crewCard}>
-        <View style={styles.crewTitleRow}>
+      <View style={styles.card}>
+        <View style={styles.sectionHeader}>
           <Text style={styles.cardTitle}>History</Text>
           <TouchableOpacity style={styles.smallPillButton} onPress={() => setHistoryOpen(!historyOpen)}>
             <Text style={styles.smallPillText}>{historyOpen ? "Hide" : "Show"}</Text>
@@ -1478,9 +1380,9 @@ export default function App() {
         </View>
 
         {!historyOpen ? (
-          <Text style={styles.crewEmpty}>Your past drinks live here now.</Text>
+          <Text style={styles.mutedText}>Your past drinks live here now.</Text>
         ) : myPosts.length === 0 ? (
-          <Text style={styles.crewEmpty}>No posts yet.</Text>
+          <Text style={styles.mutedText}>No posts yet.</Text>
         ) : (
           myPosts.map((post) => (
             <View key={post.id} style={styles.historyItem}>
@@ -1488,7 +1390,7 @@ export default function App() {
                 <Image source={{ uri: post.imageUri }} style={styles.historyImage} />
               ) : (
                 <View style={styles.historyPlaceholder}>
-                  <Text style={styles.photoText}>no photo</Text>
+                  <Text style={styles.mutedText}>no photo</Text>
                 </View>
               )}
 
@@ -1539,53 +1441,58 @@ export default function App() {
         </View>
 
         {renderHistoryPreview()}
-
-        <View style={styles.crewCard}>
-          <View style={styles.crewTitleRow}>
-            <Text style={styles.cardTitle}>Crew</Text>
-            <Text style={styles.ratingSelected}>{crewMembers.length}</Text>
-          </View>
-
-          <View style={styles.crewAddRow}>
-            <TextInput
-              style={styles.crewInput}
-              placeholder="add by handle"
-              placeholderTextColor={theme.muted}
-              autoCapitalize="none"
-              value={crewHandleDraft}
-              onChangeText={setCrewHandleDraft}
-            />
-            <TouchableOpacity
-              style={[styles.crewButton, crewSaving && styles.primaryButtonDisabled]}
-              onPress={addCrewMember}
-              disabled={crewSaving}
-            >
-              <Text style={styles.crewButtonText}>Add</Text>
-            </TouchableOpacity>
-          </View>
-
-          {crewMembers.length === 0 ? (
-            <Text style={styles.crewEmpty}>Add someone’s handle to see their posts.</Text>
-          ) : null}
-
-          {crewMembers.map((member) => (
-            <View key={member.id} style={styles.crewListItem}>
-              <View>
-                <Text style={styles.crewName}>{member.display_name}</Text>
-                <Text style={styles.crewHandle}>@{member.handle}</Text>
-              </View>
-
-              <TouchableOpacity style={styles.removeButton} onPress={() => removeCrewMember(member.id)}>
-                <Text style={styles.removeButtonText}>Remove</Text>
-              </TouchableOpacity>
-            </View>
-          ))}
-        </View>
+        {renderCrewCard()}
 
         <TouchableOpacity style={styles.signOutButton} onPress={signOut}>
           <Text style={styles.signOutText}>Sign out</Text>
         </TouchableOpacity>
       </ScrollView>
+    );
+  }
+
+  function renderCrewCard() {
+    return (
+      <View style={styles.card}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.cardTitle}>Crew</Text>
+          <Text style={styles.ratingSelected}>{crewMembers.length}</Text>
+        </View>
+
+        <View style={styles.crewAddRow}>
+          <TextInput
+            style={styles.crewInput}
+            placeholder="add by handle"
+            placeholderTextColor={theme.muted}
+            autoCapitalize="none"
+            value={crewHandleDraft}
+            onChangeText={setCrewHandleDraft}
+          />
+          <TouchableOpacity
+            style={[styles.crewButton, crewSaving && styles.buttonDisabled]}
+            onPress={addCrewMember}
+            disabled={crewSaving}
+          >
+            <Text style={styles.crewButtonText}>Add</Text>
+          </TouchableOpacity>
+        </View>
+
+        {crewMembers.length === 0 ? (
+          <Text style={styles.mutedText}>Add someone’s handle to see their posts.</Text>
+        ) : null}
+
+        {crewMembers.map((member) => (
+          <View key={member.id} style={styles.crewListItem}>
+            <View>
+              <Text style={styles.crewName}>{member.display_name}</Text>
+              <Text style={styles.crewHandle}>@{member.handle}</Text>
+            </View>
+
+            <TouchableOpacity style={styles.removeButton} onPress={() => removeCrewMember(member.id)}>
+              <Text style={styles.removeButtonText}>Remove</Text>
+            </TouchableOpacity>
+          </View>
+        ))}
+      </View>
     );
   }
 
@@ -1646,7 +1553,7 @@ export default function App() {
             behavior={Platform.OS === "ios" ? "padding" : undefined}
             style={styles.customEmojiCard}
           >
-            <Text style={styles.customEmojiTitle}>Choose emoji</Text>
+            <Text style={styles.cardTitle}>Choose emoji</Text>
             <TextInput
               style={styles.customEmojiInput}
               value={customEmojiInput}
@@ -1657,14 +1564,9 @@ export default function App() {
               maxLength={8}
             />
 
-            <View style={styles.customEmojiActions}>
-              <TouchableOpacity style={styles.modalCancelButton} onPress={closeCustomEmojiPicker}>
-                <Text style={styles.modalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.modalConfirmButton} onPress={addCustomReaction}>
-                <Text style={styles.modalConfirmText}>React</Text>
-              </TouchableOpacity>
+            <View style={styles.buttonRow}>
+              {renderButton("Cancel", closeCustomEmojiPicker, { variant: "secondary", style: styles.flexButton })}
+              {renderButton("React", addCustomReaction, { style: styles.flexButton })}
             </View>
           </KeyboardAvoidingView>
         </View>
@@ -1675,10 +1577,7 @@ export default function App() {
   function renderBottomNav() {
     return (
       <View style={styles.bottomNav}>
-        <TouchableOpacity
-          style={styles.navSideButton}
-          onPress={() => setActiveTab("Feed")}
-        >
+        <TouchableOpacity style={styles.navSideButton} onPress={() => setActiveTab("Feed")}>
           <Text style={[styles.navText, activeTab === "Feed" && styles.navTextActive]}>Feed</Text>
         </TouchableOpacity>
 
@@ -1689,16 +1588,21 @@ export default function App() {
           <Text style={styles.postNavPlus}>＋</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.navSideButton}
-          onPress={() => setActiveTab("Profile")}
-        >
+        <TouchableOpacity style={styles.navSideButton} onPress={() => setActiveTab("Profile")}>
           <Text style={[styles.navText, activeTab === "Profile" && styles.navTextActive]}>
             Profile
           </Text>
         </TouchableOpacity>
       </View>
     );
+  }
+
+  function renderToast() {
+    return toastMessage ? (
+      <View style={styles.toast} pointerEvents="none">
+        <Text style={styles.toastText}>{toastMessage}</Text>
+      </View>
+    ) : null;
   }
 
   if (authChecking) {
@@ -1769,11 +1673,15 @@ function createStyles(theme) {
       flex: 1,
       backgroundColor: theme.bg,
     },
+    content: {
+      flex: 1,
+      padding: layout.pagePadding,
+    },
     loadingScreen: {
       flex: 1,
       alignItems: "center",
       justifyContent: "center",
-      gap: 12,
+      gap: s.md,
     },
     loadingText: {
       color: theme.muted,
@@ -1781,12 +1689,12 @@ function createStyles(theme) {
     },
     authScreen: {
       flex: 1,
-      padding: 16,
+      padding: layout.pagePadding,
     },
     authScroll: {
       flexGrow: 1,
       justifyContent: "center",
-      paddingVertical: 28,
+      paddingVertical: s.xxxl,
     },
     authLogo: {
       color: theme.text,
@@ -1798,58 +1706,20 @@ function createStyles(theme) {
     authSubtitle: {
       color: theme.muted,
       textAlign: "center",
-      marginTop: 4,
-      marginBottom: 22,
+      marginTop: s.xs,
+      marginBottom: s.xxl,
       fontWeight: "700",
-    },
-    authCard: {
-      backgroundColor: theme.surface,
-      borderRadius: 30,
-      padding: 18,
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    authTitle: {
-      color: theme.text,
-      fontSize: 26,
-      fontWeight: "900",
-      marginBottom: 12,
-    },
-    authModeRow: {
-      flexDirection: "row",
-      backgroundColor: theme.surface2,
-      padding: 4,
-      borderRadius: 999,
-      marginBottom: 14,
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    authModeButton: {
-      flex: 1,
-      paddingVertical: 10,
-      borderRadius: 999,
-      alignItems: "center",
-    },
-    authModeButtonActive: {
-      backgroundColor: theme.primary,
-    },
-    authModeText: {
-      color: theme.muted,
-      fontWeight: "900",
-    },
-    authModeTextActive: {
-      color: "#0B0D0C",
     },
     authFooterText: {
       color: theme.muted,
       textAlign: "center",
-      marginTop: 14,
+      marginTop: s.lg,
       fontWeight: "700",
     },
     header: {
-      paddingHorizontal: 18,
-      paddingTop: 14,
-      paddingBottom: 14,
+      paddingHorizontal: s.xl,
+      paddingTop: s.lg,
+      paddingBottom: s.lg,
       borderBottomWidth: 1,
       borderBottomColor: theme.border,
       backgroundColor: theme.bg,
@@ -1859,111 +1729,203 @@ function createStyles(theme) {
     },
     logo: {
       color: theme.text,
-      fontSize: 32,
+      fontSize: t.logo,
       fontWeight: "900",
       letterSpacing: -1.5,
     },
     subtitle: {
       color: theme.muted,
-      fontSize: 13,
-      marginTop: 2,
+      fontSize: t.small,
+      marginTop: s.xs,
     },
     themeButton: {
       backgroundColor: theme.surface,
       borderColor: theme.border,
       borderWidth: 1,
-      paddingHorizontal: 14,
-      paddingVertical: 9,
-      borderRadius: 999,
+      paddingHorizontal: s.lg,
+      paddingVertical: s.sm + 1,
+      borderRadius: r.pill,
     },
     themeButtonText: {
       color: theme.text,
       fontWeight: "800",
-      fontSize: 12,
-    },
-    content: {
-      flex: 1,
-      padding: 16,
+      fontSize: t.tiny,
     },
     screenTitle: {
       color: theme.text,
-      fontSize: 28,
+      fontSize: t.screen,
       fontWeight: "900",
       letterSpacing: -0.8,
-      marginBottom: 4,
+      marginBottom: s.xs,
     },
     screenSubtitle: {
       color: theme.muted,
       fontSize: 14,
-      marginBottom: 18,
+      marginBottom: s.xl,
     },
-    feedModeTabs: {
-      flexDirection: "row",
+    card: {
       backgroundColor: theme.surface,
-      padding: 5,
-      borderRadius: 999,
+      borderRadius: r.card,
+      padding: layout.cardPadding,
       borderWidth: 1,
       borderColor: theme.border,
-      marginBottom: 14,
+      marginBottom: s.lg,
     },
-    feedModeButton: {
-      flex: 1,
-      paddingVertical: 11,
-      borderRadius: 999,
-      alignItems: "center",
-    },
-    feedModeButtonActive: {
-      backgroundColor: theme.primary,
-    },
-    feedModeText: {
-      color: theme.muted,
+    cardTitle: {
+      color: theme.text,
+      fontSize: t.cardTitle,
       fontWeight: "900",
+      letterSpacing: -0.5,
     },
-    feedModeTextActive: {
-      color: "#0B0D0C",
+    cardHint: {
+      color: theme.muted,
+      lineHeight: 20,
+      marginTop: s.xs,
+      marginBottom: s.lg,
+      fontWeight: "700",
+    },
+    mutedText: {
+      color: theme.muted,
+      fontWeight: "700",
+      lineHeight: 20,
+    },
+    metaText: {
+      color: theme.muted,
+      marginTop: 2,
+      fontWeight: "700",
     },
     heroCard: {
       backgroundColor: theme.primarySoft,
-      borderRadius: 26,
-      padding: 18,
-      marginBottom: 16,
+      borderRadius: r.card,
+      padding: s.xl,
+      marginBottom: s.lg,
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
       borderWidth: 1,
       borderColor: theme.border,
-      gap: 12,
+      gap: s.md,
     },
     heroTextWrap: {
       flex: 1,
-      paddingRight: 8,
+      paddingRight: s.sm,
     },
     heroTitle: {
       color: theme.text,
-      fontSize: 22,
+      fontSize: t.cardTitle,
       fontWeight: "900",
+      letterSpacing: -0.7,
     },
     heroText: {
       color: theme.muted,
-      marginTop: 4,
+      marginTop: s.xs,
       lineHeight: 20,
+      fontWeight: "700",
     },
     heroButton: {
+      minHeight: layout.buttonHeight,
       backgroundColor: theme.primary,
-      paddingHorizontal: 18,
-      paddingVertical: 11,
-      borderRadius: 999,
+      paddingHorizontal: s.xl,
+      borderRadius: r.pill,
+      alignItems: "center",
+      justifyContent: "center",
       flexShrink: 0,
     },
     heroButtonText: {
       color: "#0B0D0C",
       fontWeight: "900",
+      fontSize: t.body,
     },
-    feedCard: {
+    segmentedControl: {
+      flexDirection: "row",
       backgroundColor: theme.surface,
-      borderRadius: 28,
-      padding: 14,
-      marginBottom: 18,
+      padding: 5,
+      borderRadius: r.pill,
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: s.lg,
+    },
+    segmentButton: {
+      flex: 1,
+      minHeight: 42,
+      borderRadius: r.pill,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    segmentButtonActive: {
+      backgroundColor: theme.primary,
+    },
+    segmentText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    segmentTextActive: {
+      color: "#0B0D0C",
+    },
+    button: {
+      minHeight: layout.buttonHeight,
+      borderRadius: r.lg,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: s.lg,
+    },
+    buttonPrimary: {
+      backgroundColor: theme.primary,
+    },
+    buttonSecondary: {
+      backgroundColor: theme.surface2,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    buttonDisabled: {
+      backgroundColor: theme.surface2,
+      borderWidth: 1,
+      borderColor: theme.border,
+      opacity: 0.72,
+    },
+    buttonText: {
+      fontSize: t.body,
+      fontWeight: "900",
+    },
+    buttonTextPrimary: {
+      color: "#0B0D0C",
+    },
+    buttonTextSecondary: {
+      color: theme.text,
+    },
+    buttonTextDisabled: {
+      color: theme.muted,
+    },
+    flexButton: {
+      flex: 1,
+    },
+    buttonRow: {
+      flexDirection: "row",
+      gap: s.md,
+      marginBottom: s.xxl,
+    },
+    inputLabel: {
+      color: theme.text,
+      fontWeight: "900",
+      marginBottom: s.sm,
+      marginTop: s.xs,
+    },
+    input: {
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: r.lg,
+      paddingHorizontal: s.lg,
+      minHeight: layout.buttonHeight,
+      marginBottom: s.md,
+      borderWidth: 1,
+      borderColor: theme.border,
+      fontSize: t.body,
+    },
+    postCard: {
+      backgroundColor: theme.surface,
+      borderRadius: r.card,
+      padding: s.lg,
+      marginBottom: s.xl,
       borderWidth: 1,
       borderColor: theme.border,
     },
@@ -1971,33 +1933,29 @@ function createStyles(theme) {
       flexDirection: "row",
       justifyContent: "space-between",
       alignItems: "center",
-      marginBottom: 12,
+      marginBottom: s.md,
     },
     username: {
       color: theme.text,
-      fontSize: 16,
+      fontSize: t.body,
       fontWeight: "900",
-    },
-    date: {
-      color: theme.muted,
-      marginTop: 2,
     },
     categoryPill: {
       backgroundColor: theme.accentSoft,
-      borderRadius: 999,
-      paddingHorizontal: 12,
-      paddingVertical: 7,
+      borderRadius: r.pill,
+      paddingHorizontal: s.md,
+      paddingVertical: s.sm,
     },
     categoryPillText: {
       color: theme.accent,
       fontWeight: "900",
-      fontSize: 12,
+      fontSize: t.tiny,
     },
     postImageFrame: {
       width: "100%",
-      aspectRatio: 4 / 5,
-      borderRadius: 24,
-      marginBottom: 14,
+      aspectRatio: layout.photoRatio,
+      borderRadius: r.xl,
+      marginBottom: s.lg,
       overflow: "hidden",
       backgroundColor: theme.surface2,
     },
@@ -2008,98 +1966,75 @@ function createStyles(theme) {
     },
     placeholderPortrait: {
       width: "100%",
-      aspectRatio: 4 / 5,
+      aspectRatio: layout.photoRatio,
       backgroundColor: theme.surface2,
-      borderRadius: 24,
+      borderRadius: r.xl,
       justifyContent: "center",
       alignItems: "center",
-      marginBottom: 14,
+      marginBottom: s.lg,
       borderWidth: 1,
       borderColor: theme.border,
     },
-    photoText: {
-      color: theme.muted,
-      fontWeight: "800",
-    },
     bevName: {
       color: theme.text,
-      fontSize: 23,
+      fontSize: t.cardTitle,
       fontWeight: "900",
       letterSpacing: -0.4,
     },
     flavorName: {
       color: theme.muted,
-      fontSize: 16,
+      fontSize: t.body,
       fontWeight: "700",
       marginTop: 2,
-      marginBottom: 12,
+      marginBottom: s.sm,
     },
-    metaRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      marginBottom: 10,
-    },
-    rating: {
+    ratingText: {
       color: theme.primary,
       fontWeight: "900",
+      marginBottom: s.md,
     },
     caption: {
       color: theme.text,
       lineHeight: 20,
       backgroundColor: theme.surface2,
-      padding: 12,
-      borderRadius: 16,
+      padding: s.md,
+      borderRadius: r.md,
       overflow: "hidden",
-      marginBottom: 12,
+      marginBottom: s.md,
     },
     reactionScroll: {
-      marginBottom: 12,
+      marginBottom: s.md,
       marginHorizontal: -2,
     },
     reactionScrollContent: {
       alignItems: "center",
-      gap: 8,
+      gap: s.sm,
       paddingHorizontal: 2,
-      paddingRight: 12,
+      paddingRight: s.md,
     },
-    defaultReactionButton: {
-      alignSelf: "flex-start",
+    reactionButton: {
       backgroundColor: theme.surface2,
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      borderRadius: 999,
+      paddingHorizontal: s.md,
+      paddingVertical: s.sm + 1,
+      borderRadius: r.pill,
       borderWidth: 1,
       borderColor: theme.border,
     },
-    defaultReactionText: {
-      color: theme.text,
-      fontWeight: "900",
-      fontSize: 15,
-    },
-    reactionChip: {
-      backgroundColor: theme.surface2,
-      paddingHorizontal: 12,
-      paddingVertical: 9,
-      borderRadius: 999,
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    reactionChipText: {
+    reactionText: {
       color: theme.text,
       fontWeight: "900",
       fontSize: 14,
     },
     commentsBox: {
       backgroundColor: theme.surface2,
-      borderRadius: 16,
-      padding: 12,
-      marginBottom: 10,
+      borderRadius: r.md,
+      padding: s.md,
+      marginBottom: s.md,
     },
     commentText: {
       color: theme.text,
       lineHeight: 20,
-      marginBottom: 4,
+      marginBottom: s.xs,
     },
     commentUser: {
       fontWeight: "900",
@@ -2107,16 +2042,16 @@ function createStyles(theme) {
     },
     commentRow: {
       flexDirection: "row",
-      gap: 8,
+      gap: s.sm,
       alignItems: "center",
     },
     commentInput: {
       flex: 1,
+      minHeight: 44,
       backgroundColor: theme.input,
       color: theme.text,
-      borderRadius: 999,
-      paddingHorizontal: 14,
-      paddingVertical: 11,
+      borderRadius: r.pill,
+      paddingHorizontal: s.lg,
       borderWidth: 1,
       borderColor: theme.border,
     },
@@ -2134,111 +2069,13 @@ function createStyles(theme) {
       fontSize: 18,
       marginLeft: 2,
     },
-    pickerBackdrop: {
-      flex: 1,
-      backgroundColor: "rgba(0,0,0,0.34)",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 20,
-    },
-    pickerBackdropPressTarget: {
-      ...StyleSheet.absoluteFillObject,
-    },
-    reactionPicker: {
-      backgroundColor: theme.surface,
-      borderRadius: 999,
-      padding: 10,
-      flexDirection: "row",
-      gap: 8,
-      borderWidth: 1,
-      borderColor: theme.border,
-      shadowColor: "#000",
-      shadowOpacity: 0.25,
-      shadowRadius: 18,
-      elevation: 8,
-    },
-    pickerReactionButton: {
-      width: 46,
-      height: 46,
-      borderRadius: 23,
-      backgroundColor: theme.surface2,
-      alignItems: "center",
-      justifyContent: "center",
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    pickerReactionText: {
-      fontSize: 23,
-    },
-    pickerPlusText: {
-      color: theme.text,
-      fontSize: 25,
-      fontWeight: "700",
-    },
-    customEmojiCard: {
-      width: "100%",
-      maxWidth: 340,
-      backgroundColor: theme.surface,
-      borderRadius: 26,
-      padding: 18,
-      borderWidth: 1,
-      borderColor: theme.border,
-      shadowColor: "#000",
-      shadowOpacity: 0.25,
-      shadowRadius: 18,
-      elevation: 8,
-    },
-    customEmojiTitle: {
-      color: theme.text,
-      fontSize: 20,
-      fontWeight: "900",
-      marginBottom: 12,
-    },
-    customEmojiInput: {
-      backgroundColor: theme.input,
-      color: theme.text,
-      borderRadius: 18,
-      padding: 15,
-      borderWidth: 1,
-      borderColor: theme.border,
-      fontSize: 22,
-      marginBottom: 14,
-    },
-    customEmojiActions: {
-      flexDirection: "row",
-      gap: 10,
-    },
-    modalCancelButton: {
-      flex: 1,
-      backgroundColor: theme.surface2,
-      borderRadius: 18,
-      padding: 14,
-      alignItems: "center",
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    modalCancelText: {
-      color: theme.text,
-      fontWeight: "900",
-    },
-    modalConfirmButton: {
-      flex: 1,
-      backgroundColor: theme.primary,
-      borderRadius: 18,
-      padding: 14,
-      alignItems: "center",
-    },
-    modalConfirmText: {
-      color: "#0B0D0C",
-      fontWeight: "900",
-    },
     stepWrap: {
       flexDirection: "row",
       justifyContent: "space-between",
-      marginBottom: 18,
+      marginBottom: s.lg,
       backgroundColor: theme.surface,
-      borderRadius: 22,
-      padding: 12,
+      borderRadius: r.xl,
+      padding: s.md,
       borderWidth: 1,
       borderColor: theme.border,
     },
@@ -2263,7 +2100,7 @@ function createStyles(theme) {
     stepNumber: {
       color: theme.muted,
       fontWeight: "900",
-      fontSize: 12,
+      fontSize: t.tiny,
     },
     stepNumberActive: {
       color: "#0B0D0C",
@@ -2272,75 +2109,243 @@ function createStyles(theme) {
       color: theme.muted,
       fontSize: 11,
       fontWeight: "800",
-      marginTop: 6,
+      marginTop: s.sm,
     },
     stepLabelActive: {
       color: theme.text,
     },
-    wizardButtons: {
-      flexDirection: "row",
-      gap: 10,
-      marginBottom: 24,
-    },
-    primaryButton: {
-      flex: 1,
-      backgroundColor: theme.primary,
-      padding: 16,
-      borderRadius: 20,
-      alignItems: "center",
-    },
-    primaryButtonDisabled: {
+    photoCompactCard: {
       backgroundColor: theme.surface2,
+      borderRadius: r.xl,
+      padding: s.md,
       borderWidth: 1,
       borderColor: theme.border,
-    },
-    primaryButtonText: {
-      color: "#0B0D0C",
-      fontSize: 16,
-      fontWeight: "900",
-    },
-    primaryButtonTextDisabled: {
-      color: theme.muted,
-    },
-    secondaryButton: {
-      flex: 1,
-      backgroundColor: theme.surface,
-      padding: 16,
-      borderRadius: 20,
+      flexDirection: "row",
+      gap: s.md,
       alignItems: "center",
+    },
+    photoThumbnail: {
+      width: 82,
+      aspectRatio: layout.photoRatio,
+      borderRadius: r.md,
+      backgroundColor: theme.surface,
+    },
+    photoThumbnailEmpty: {
+      width: 82,
+      aspectRatio: layout.photoRatio,
+      borderRadius: r.md,
+      backgroundColor: theme.surface,
+      alignItems: "center",
+      justifyContent: "center",
       borderWidth: 1,
       borderColor: theme.border,
     },
-    secondaryButtonText: {
+    photoThumbnailIcon: {
+      color: theme.primary,
+      fontSize: 34,
+      fontWeight: "300",
+    },
+    photoActionArea: {
+      flex: 1,
+    },
+    photoStatus: {
       color: theme.text,
-      fontSize: 16,
+      fontSize: 17,
       fontWeight: "900",
+    },
+    photoSubtext: {
+      color: theme.muted,
+      marginTop: 3,
+      marginBottom: s.md,
+      fontWeight: "700",
+    },
+    compactButtonRow: {
+      flexDirection: "row",
+      gap: s.sm,
+    },
+    compactPrimary: {
+      backgroundColor: theme.primary,
+      paddingHorizontal: s.md,
+      paddingVertical: s.sm + 2,
+      borderRadius: r.pill,
+    },
+    compactPrimaryText: {
+      color: "#0B0D0C",
+      fontWeight: "900",
+      fontSize: t.tiny,
+    },
+    compactSecondary: {
+      backgroundColor: theme.surface,
+      paddingHorizontal: s.md,
+      paddingVertical: s.sm + 2,
+      borderRadius: r.pill,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    compactSecondaryText: {
+      color: theme.text,
+      fontWeight: "900",
+      fontSize: t.tiny,
+    },
+    manualHint: {
+      color: theme.muted,
+      fontSize: t.tiny,
+      fontWeight: "800",
+      marginTop: s.sm,
+      marginBottom: s.md,
+    },
+    lookupText: {
+      color: theme.muted,
+      marginBottom: s.sm,
+      fontWeight: "700",
+    },
+    chipRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: s.sm,
+      marginTop: 2,
+    },
+    chip: {
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      paddingHorizontal: s.md,
+      paddingVertical: s.sm + 1,
+      borderRadius: r.pill,
+    },
+    chipActive: {
+      backgroundColor: theme.primary,
+      borderColor: theme.primary,
+    },
+    chipText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    chipTextActive: {
+      color: "#0B0D0C",
+    },
+    reviewSummaryCard: {
+      backgroundColor: theme.surface2,
+      borderRadius: r.lg,
+      padding: s.md,
+      borderWidth: 1,
+      borderColor: theme.border,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: s.md,
+      marginBottom: s.md,
+    },
+    reviewThumbnail: {
+      width: 68,
+      aspectRatio: layout.photoRatio,
+      borderRadius: r.md,
+      backgroundColor: theme.surface,
+    },
+    reviewTextWrap: {
+      flex: 1,
+    },
+    reviewBrand: {
+      color: theme.text,
+      fontSize: t.title,
+      fontWeight: "900",
+    },
+    reviewFlavor: {
+      color: theme.muted,
+      fontSize: 15,
+      fontWeight: "800",
+      marginTop: 2,
+    },
+    reviewCategory: {
+      alignSelf: "flex-start",
+      color: theme.accent,
+      fontSize: t.tiny,
+      fontWeight: "900",
+      backgroundColor: theme.accentSoft,
+      paddingHorizontal: s.md,
+      paddingVertical: s.xs + 1,
+      borderRadius: r.pill,
+      marginTop: s.sm,
+      overflow: "hidden",
+    },
+    ratingHeaderRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: s.sm,
+    },
+    ratingSelected: {
+      color: theme.primary,
+      fontWeight: "900",
+    },
+    ratingGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      justifyContent: "space-between",
+      rowGap: s.sm,
+      marginBottom: s.sm,
+    },
+    ratingBubble: {
+      width: "18%",
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: theme.surface2,
+      borderColor: theme.border,
+      borderWidth: 1,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    ratingBubbleActive: {
+      backgroundColor: theme.primary,
+      borderColor: theme.primary,
+    },
+    ratingBubbleText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    ratingBubbleTextActive: {
+      color: "#0B0D0C",
+    },
+    ratingGuideRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      marginBottom: s.md,
+    },
+    ratingGuideText: {
+      color: theme.muted,
+      fontSize: t.tiny,
+      fontWeight: "800",
+    },
+    captionInput: {
+      minHeight: 92,
+      textAlignVertical: "top",
+      lineHeight: 22,
+      paddingTop: s.md,
     },
     cameraCaptureScreen: {
       flex: 1,
       backgroundColor: "#000000",
-      padding: 16,
+      padding: s.lg,
       justifyContent: "space-between",
     },
     cameraCaptureHeader: {
-      paddingTop: 18,
+      paddingTop: s.xl,
       alignItems: "center",
     },
     cameraCaptureTitle: {
       color: "#FFFFFF",
-      fontSize: 24,
+      fontSize: t.cardTitle,
       fontWeight: "900",
     },
     cameraCaptureText: {
       color: "rgba(255,255,255,0.72)",
-      marginTop: 6,
+      marginTop: s.sm,
       fontWeight: "700",
       textAlign: "center",
     },
     cameraFrame: {
       width: "100%",
-      aspectRatio: 4 / 5,
-      borderRadius: 28,
+      aspectRatio: layout.photoRatio,
+      borderRadius: r.xxl,
       overflow: "hidden",
       backgroundColor: "#111111",
       borderWidth: 2,
@@ -2353,14 +2358,14 @@ function createStyles(theme) {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
-      paddingBottom: 26,
-      paddingHorizontal: 4,
+      paddingBottom: s.xxl,
+      paddingHorizontal: s.xs,
     },
     cameraCancelButton: {
       minWidth: 86,
-      paddingHorizontal: 14,
-      paddingVertical: 12,
-      borderRadius: 999,
+      paddingHorizontal: s.lg,
+      paddingVertical: s.md,
+      borderRadius: r.pill,
       backgroundColor: "rgba(255,255,255,0.14)",
       alignItems: "center",
     },
@@ -2390,21 +2395,18 @@ function createStyles(theme) {
       flex: 1,
       backgroundColor: "#000000",
     },
-    camera: {
-      flex: 1,
-    },
     scannerOverlay: {
       ...StyleSheet.absoluteFillObject,
-      padding: 22,
+      padding: s.xxl,
       justifyContent: "space-between",
       alignItems: "center",
       backgroundColor: "rgba(0,0,0,0.18)",
     },
     scannerTitle: {
       color: "#FFFFFF",
-      fontSize: 28,
+      fontSize: t.screen,
       fontWeight: "900",
-      marginTop: 30,
+      marginTop: s.xxxl,
     },
     scannerText: {
       color: "#FFFFFF",
@@ -2418,282 +2420,34 @@ function createStyles(theme) {
       height: 170,
       borderWidth: 3,
       borderColor: theme.primary,
-      borderRadius: 22,
+      borderRadius: r.xl,
       backgroundColor: "rgba(0,0,0,0.08)",
     },
     scannerClose: {
       backgroundColor: "#FFFFFF",
-      paddingHorizontal: 22,
-      paddingVertical: 14,
-      borderRadius: 999,
-      marginBottom: 26,
+      paddingHorizontal: s.xl,
+      paddingVertical: s.md,
+      borderRadius: r.pill,
+      marginBottom: s.xxl,
     },
     scannerCloseText: {
       color: "#111111",
       fontWeight: "900",
     },
-    wizardCard: {
-      backgroundColor: theme.surface,
-      borderRadius: 30,
-      padding: 16,
-      borderWidth: 1,
-      borderColor: theme.border,
-      marginBottom: 16,
-    },
-    cardTitle: {
-      color: theme.text,
-      fontSize: 24,
-      fontWeight: "900",
-      letterSpacing: -0.6,
-    },
-    cardHint: {
-      color: theme.muted,
-      lineHeight: 20,
-      marginTop: 6,
-      marginBottom: 16,
-    },
-    photoCompactCard: {
-      backgroundColor: theme.surface2,
-      borderRadius: 24,
-      padding: 12,
-      borderWidth: 1,
-      borderColor: theme.border,
-      flexDirection: "row",
-      gap: 12,
-      alignItems: "center",
-    },
-    photoThumbnail: {
-      width: 82,
-      aspectRatio: 4 / 5,
-      borderRadius: 18,
-      backgroundColor: theme.surface,
-    },
-    photoThumbnailEmpty: {
-      width: 82,
-      aspectRatio: 4 / 5,
-      borderRadius: 18,
-      backgroundColor: theme.surface,
-      alignItems: "center",
-      justifyContent: "center",
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    photoThumbnailIcon: {
-      color: theme.primary,
-      fontSize: 34,
-      fontWeight: "300",
-    },
-    photoActionArea: {
-      flex: 1,
-    },
-    photoStatus: {
-      color: theme.text,
-      fontSize: 17,
-      fontWeight: "900",
-    },
-    photoSubtext: {
-      color: theme.muted,
-      marginTop: 3,
-      marginBottom: 12,
-      fontWeight: "700",
-    },
-    photoButtonRow: {
-      flexDirection: "row",
-      gap: 8,
-    },
-    compactPrimary: {
-      backgroundColor: theme.primary,
-      paddingHorizontal: 12,
-      paddingVertical: 10,
-      borderRadius: 999,
-    },
-    compactPrimaryText: {
-      color: "#0B0D0C",
-      fontWeight: "900",
-      fontSize: 12,
-    },
-    compactSecondary: {
-      backgroundColor: theme.surface,
-      paddingHorizontal: 12,
-      paddingVertical: 10,
-      borderRadius: 999,
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    compactSecondaryText: {
-      color: theme.text,
-      fontWeight: "900",
-      fontSize: 12,
-    },
-    scanButton: {
-      backgroundColor: theme.primary,
-      padding: 16,
-      borderRadius: 20,
-      alignItems: "center",
-      marginBottom: 8,
-    },
-    scanButtonText: {
-      color: "#0B0D0C",
-      fontSize: 16,
-      fontWeight: "900",
-    },
-    manualHint: {
-      color: theme.muted,
-      fontSize: 12,
-      fontWeight: "800",
-      marginBottom: 10,
-    },
-    lookupText: {
-      color: theme.muted,
-      marginBottom: 8,
-      fontWeight: "700",
-    },
-    inputLabel: {
-      color: theme.text,
-      fontWeight: "900",
-      marginBottom: 8,
-      marginTop: 6,
-    },
-    input: {
-      backgroundColor: theme.input,
-      color: theme.text,
-      borderRadius: 18,
-      padding: 15,
-      marginBottom: 12,
-      borderWidth: 1,
-      borderColor: theme.border,
-      fontSize: 16,
-    },
-    chipRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 8,
-      marginTop: 2,
-    },
-    chip: {
-      backgroundColor: theme.surface2,
-      borderColor: theme.border,
-      borderWidth: 1,
-      paddingHorizontal: 13,
-      paddingVertical: 10,
-      borderRadius: 999,
-    },
-    chipActive: {
-      backgroundColor: theme.primary,
-      borderColor: theme.primary,
-    },
-    chipText: {
-      color: theme.muted,
-      fontWeight: "900",
-    },
-    chipTextActive: {
-      color: "#0B0D0C",
-    },
-    reviewSummaryCard: {
-      backgroundColor: theme.surface2,
-      borderRadius: 22,
-      padding: 10,
-      borderWidth: 1,
-      borderColor: theme.border,
+    sectionHeader: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 12,
-      marginBottom: 12,
-    },
-    reviewThumbnail: {
-      width: 68,
-      aspectRatio: 4 / 5,
-      borderRadius: 16,
-      backgroundColor: theme.surface,
-    },
-    reviewTextWrap: {
-      flex: 1,
-    },
-    reviewBrand: {
-      color: theme.text,
-      fontSize: 21,
-      fontWeight: "900",
-    },
-    reviewFlavor: {
-      color: theme.muted,
-      fontSize: 15,
-      fontWeight: "800",
-      marginTop: 2,
-    },
-    reviewCategory: {
-      alignSelf: "flex-start",
-      color: theme.accent,
-      fontSize: 12,
-      fontWeight: "900",
-      backgroundColor: theme.accentSoft,
-      paddingHorizontal: 10,
-      paddingVertical: 5,
-      borderRadius: 999,
-      marginTop: 8,
-      overflow: "hidden",
-    },
-    ratingHeaderRow: {
-      flexDirection: "row",
       justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 8,
-    },
-    ratingSelected: {
-      color: theme.primary,
-      fontWeight: "900",
-      marginTop: 6,
-    },
-    ratingGrid: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      justifyContent: "space-between",
-      rowGap: 6,
-      marginBottom: 8,
-    },
-    ratingBubble: {
-      width: "18%",
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: theme.surface2,
-      borderColor: theme.border,
-      borderWidth: 1,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    ratingBubbleActive: {
-      backgroundColor: theme.primary,
-      borderColor: theme.primary,
-    },
-    ratingBubbleText: {
-      color: theme.muted,
-      fontWeight: "900",
-    },
-    ratingBubbleTextActive: {
-      color: "#0B0D0C",
-    },
-    ratingGuideRow: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      marginBottom: 12,
-    },
-    ratingGuideText: {
-      color: theme.muted,
-      fontSize: 12,
-      fontWeight: "800",
-    },
-    captionInput: {
-      minHeight: 92,
-      textAlignVertical: "top",
-      lineHeight: 22,
+      marginBottom: s.md,
     },
     profileCard: {
       backgroundColor: theme.surface,
-      borderRadius: 30,
-      padding: 22,
+      borderRadius: r.card,
+      padding: s.xxl,
       alignItems: "center",
       borderWidth: 1,
       borderColor: theme.border,
-      marginBottom: 14,
+      marginBottom: s.lg,
     },
     avatar: {
       width: 92,
@@ -2702,7 +2456,7 @@ function createStyles(theme) {
       backgroundColor: theme.primary,
       justifyContent: "center",
       alignItems: "center",
-      marginBottom: 12,
+      marginBottom: s.md,
     },
     avatarText: {
       color: "#0B0D0C",
@@ -2721,19 +2475,19 @@ function createStyles(theme) {
     },
     profileEmail: {
       color: theme.muted,
-      marginTop: 4,
-      marginBottom: 20,
-      fontSize: 12,
+      marginTop: s.xs,
+      marginBottom: s.xl,
+      fontSize: t.tiny,
       fontWeight: "700",
     },
     statsRow: {
       flexDirection: "row",
-      gap: 10,
+      gap: s.sm,
     },
     statBox: {
       backgroundColor: theme.surface2,
-      padding: 14,
-      borderRadius: 18,
+      padding: s.md,
+      borderRadius: r.lg,
       minWidth: 84,
       alignItems: "center",
       borderWidth: 1,
@@ -2741,8 +2495,8 @@ function createStyles(theme) {
     },
     statBoxAccent: {
       backgroundColor: theme.accentSoft,
-      padding: 14,
-      borderRadius: 18,
+      padding: s.md,
+      borderRadius: r.lg,
       minWidth: 84,
       alignItems: "center",
       borderWidth: 1,
@@ -2750,7 +2504,7 @@ function createStyles(theme) {
     },
     statNumber: {
       color: theme.text,
-      fontSize: 24,
+      fontSize: t.cardTitle,
       fontWeight: "900",
     },
     statLabel: {
@@ -2758,72 +2512,55 @@ function createStyles(theme) {
       marginTop: 2,
       fontWeight: "800",
     },
-    crewCard: {
-      backgroundColor: theme.surface,
-      borderRadius: 28,
-      padding: 16,
-      borderWidth: 1,
-      borderColor: theme.border,
-      marginBottom: 14,
-    },
-    crewTitleRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      marginBottom: 10,
-    },
     smallPillButton: {
       backgroundColor: theme.surface2,
-      borderRadius: 999,
-      paddingHorizontal: 13,
-      paddingVertical: 8,
+      borderRadius: r.pill,
+      paddingHorizontal: s.md,
+      paddingVertical: s.sm,
       borderWidth: 1,
       borderColor: theme.border,
     },
     smallPillText: {
       color: theme.text,
       fontWeight: "900",
-      fontSize: 12,
+      fontSize: t.tiny,
     },
     crewAddRow: {
       flexDirection: "row",
-      gap: 8,
+      gap: s.sm,
       alignItems: "center",
-      marginBottom: 12,
+      marginBottom: s.md,
     },
     crewInput: {
       flex: 1,
+      minHeight: 44,
       backgroundColor: theme.input,
       color: theme.text,
-      borderRadius: 999,
-      paddingHorizontal: 14,
-      paddingVertical: 11,
+      borderRadius: r.pill,
+      paddingHorizontal: s.lg,
       borderWidth: 1,
       borderColor: theme.border,
     },
     crewButton: {
       backgroundColor: theme.primary,
-      paddingHorizontal: 16,
-      paddingVertical: 12,
-      borderRadius: 999,
+      paddingHorizontal: s.lg,
+      minHeight: 44,
+      borderRadius: r.pill,
+      alignItems: "center",
+      justifyContent: "center",
     },
     crewButtonText: {
       color: "#0B0D0C",
       fontWeight: "900",
-    },
-    crewEmpty: {
-      color: theme.muted,
-      fontWeight: "700",
-      lineHeight: 20,
     },
     crewListItem: {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
       backgroundColor: theme.surface2,
-      borderRadius: 18,
-      padding: 12,
-      marginTop: 8,
+      borderRadius: r.lg,
+      padding: s.md,
+      marginTop: s.sm,
       borderWidth: 1,
       borderColor: theme.border,
     },
@@ -2839,36 +2576,36 @@ function createStyles(theme) {
     },
     removeButton: {
       backgroundColor: theme.accentSoft,
-      borderRadius: 999,
-      paddingHorizontal: 12,
-      paddingVertical: 8,
+      borderRadius: r.pill,
+      paddingHorizontal: s.md,
+      paddingVertical: s.sm,
     },
     removeButtonText: {
       color: theme.accent,
       fontWeight: "900",
-      fontSize: 12,
+      fontSize: t.tiny,
     },
     historyItem: {
       backgroundColor: theme.surface2,
-      padding: 10,
-      borderRadius: 20,
-      marginTop: 8,
+      padding: s.md,
+      borderRadius: r.lg,
+      marginTop: s.sm,
       borderWidth: 1,
       borderColor: theme.border,
       flexDirection: "row",
-      gap: 12,
+      gap: s.md,
       alignItems: "center",
     },
     historyImage: {
       width: 72,
-      aspectRatio: 4 / 5,
-      borderRadius: 16,
+      aspectRatio: layout.photoRatio,
+      borderRadius: r.md,
       backgroundColor: theme.surface2,
     },
     historyPlaceholder: {
       width: 72,
-      aspectRatio: 4 / 5,
-      borderRadius: 16,
+      aspectRatio: layout.photoRatio,
+      borderRadius: r.md,
       backgroundColor: theme.surface,
       alignItems: "center",
       justifyContent: "center",
@@ -2879,7 +2616,7 @@ function createStyles(theme) {
     historyDate: {
       color: theme.primary,
       fontWeight: "900",
-      marginBottom: 4,
+      marginBottom: s.xs,
     },
     historyBev: {
       color: theme.text,
@@ -2893,29 +2630,94 @@ function createStyles(theme) {
     },
     historyRating: {
       color: theme.accent,
-      marginTop: 8,
+      marginTop: s.sm,
       fontWeight: "900",
     },
     signOutButton: {
       backgroundColor: theme.surface,
-      borderRadius: 20,
-      padding: 16,
+      borderRadius: r.lg,
+      padding: s.lg,
       alignItems: "center",
       borderWidth: 1,
       borderColor: theme.border,
-      marginBottom: 24,
+      marginBottom: s.xxl,
     },
     signOutText: {
       color: theme.accent,
       fontWeight: "900",
-      fontSize: 16,
+      fontSize: t.body,
+    },
+    pickerBackdrop: {
+      flex: 1,
+      backgroundColor: theme.overlay,
+      alignItems: "center",
+      justifyContent: "center",
+      padding: s.xl,
+    },
+    pickerBackdropPressTarget: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    reactionPicker: {
+      backgroundColor: theme.surface,
+      borderRadius: r.pill,
+      padding: s.sm + 2,
+      flexDirection: "row",
+      gap: s.sm,
+      borderWidth: 1,
+      borderColor: theme.border,
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 18,
+      elevation: 8,
+    },
+    pickerReactionButton: {
+      width: 46,
+      height: 46,
+      borderRadius: 23,
+      backgroundColor: theme.surface2,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    pickerReactionText: {
+      fontSize: 23,
+    },
+    pickerPlusText: {
+      color: theme.text,
+      fontSize: 25,
+      fontWeight: "700",
+    },
+    customEmojiCard: {
+      width: "100%",
+      maxWidth: 340,
+      backgroundColor: theme.surface,
+      borderRadius: r.card,
+      padding: s.xl,
+      borderWidth: 1,
+      borderColor: theme.border,
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 18,
+      elevation: 8,
+    },
+    customEmojiInput: {
+      backgroundColor: theme.input,
+      color: theme.text,
+      borderRadius: r.lg,
+      padding: s.lg,
+      borderWidth: 1,
+      borderColor: theme.border,
+      fontSize: 22,
+      marginTop: s.md,
+      marginBottom: s.lg,
     },
     bottomNav: {
       height: 76,
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
-      paddingHorizontal: 22,
+      paddingHorizontal: s.xxl,
       borderTopWidth: 1,
       borderTopColor: theme.border,
       backgroundColor: theme.tab,
@@ -2923,7 +2725,7 @@ function createStyles(theme) {
     navSideButton: {
       width: 110,
       alignItems: "center",
-      paddingVertical: 12,
+      paddingVertical: s.md,
     },
     navText: {
       color: theme.muted,
@@ -2959,13 +2761,13 @@ function createStyles(theme) {
     },
     toast: {
       position: "absolute",
-      left: 20,
-      right: 20,
+      left: s.xl,
+      right: s.xl,
       bottom: 92,
       backgroundColor: theme.text,
-      borderRadius: 999,
-      paddingVertical: 12,
-      paddingHorizontal: 16,
+      borderRadius: r.pill,
+      paddingVertical: s.md,
+      paddingHorizontal: s.lg,
       alignItems: "center",
       shadowColor: "#000",
       shadowOpacity: 0.22,

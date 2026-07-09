@@ -99,12 +99,14 @@ function sanitizeHandle(value) {
 
 function deriveNameFromEmail(email) {
   const base = String(email || "bev user").split("@")[0] || "bev user";
-  return base
+  const name = base
     .replace(/[._-]+/g, " ")
     .split(" ")
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ") || "Bev User";
+    .join(" ");
+
+  return name || "Bev User";
 }
 
 function getVisibleReactionEntries(reactions) {
@@ -168,8 +170,8 @@ export default function App() {
   const styles = createStyles(theme);
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const longPressUsedRef = useRef(false);
   const photoCameraRef = useRef(null);
+  const longPressUsedRef = useRef(false);
   const toastTimerRef = useRef(null);
 
   const [session, setSession] = useState(null);
@@ -185,11 +187,13 @@ export default function App() {
   const [crewMembers, setCrewMembers] = useState([]);
   const [crewHandleDraft, setCrewHandleDraft] = useState("");
   const [crewSaving, setCrewSaving] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [activeTab, setActiveTab] = useState("Feed");
+  const [feedMode, setFeedMode] = useState("crew");
   const [posts, setPosts] = useState([]);
   const [commentDrafts, setCommentDrafts] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
 
@@ -216,12 +220,17 @@ export default function App() {
   const profileHandle =
     profile?.handle || sanitizeHandle(user?.email?.split("@")[0] || profileDisplayName);
   const avatarLetter = (profileDisplayName.trim()[0] || "B").toUpperCase();
+  const crewUserIds = new Set([user?.id, ...crewMembers.map((member) => member.id)]);
   const myPosts = posts.filter((post) =>
     post.userId ? post.userId === user?.id : post.user === profileDisplayName
   );
-  const streak = myPosts.length;
-  const steps = ["Photo", "Scan", "Post"];
+  const visiblePosts = posts.filter((post) => {
+    if (feedMode === "explore") return true;
+    if (post.userId) return crewUserIds.has(post.userId);
+    return post.user === profileDisplayName;
+  });
   const categories = ["Energy", "Soda", "Coffee", "Water", "Other"];
+  const steps = ["Photo", "Scan", "Post"];
 
   useEffect(() => {
     let mounted = true;
@@ -236,17 +245,14 @@ export default function App() {
       if (error) {
         Alert.alert("Auth error", error.message);
         setAuthChecking(false);
-        setLoading(false);
         return;
       }
 
-      const nextSession = data.session;
-      setSession(nextSession);
+      setSession(data.session);
 
-      if (nextSession?.user) {
-        await bootstrapUser(nextSession.user);
+      if (data.session?.user) {
+        await bootstrapUser(data.session.user);
       } else {
-        setLoading(false);
         setAuthChecking(false);
       }
     }
@@ -280,12 +286,8 @@ export default function App() {
 
   function showToast(message) {
     setToastMessage(message);
-
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-
-    toastTimerRef.current = setTimeout(() => {
-      setToastMessage("");
-    }, 2200);
+    toastTimerRef.current = setTimeout(() => setToastMessage(""), 2200);
   }
 
   function isStepReady(step = postStep) {
@@ -313,74 +315,96 @@ export default function App() {
     try {
       setAuthChecking(true);
       setLoading(true);
-
       await ensureProfile(authUser);
       const members = await loadCrew(authUser.id);
-      await loadPosts(authUser.id, members);
+      await loadPosts();
+      setLoading(false);
     } catch (error) {
+      setLoading(false);
       Alert.alert(
         "Setup needed",
         error.message || "Could not load your account. Make sure the Supabase SQL setup has been run."
       );
-      setLoading(false);
     }
 
     setAuthChecking(false);
   }
 
-  async function ensureProfile(authUser) {
+  async function fetchProfileById(profileId) {
     const { data, error } = await supabase
       .from("profiles")
       .select("*")
-      .eq("id", authUser.id)
+      .eq("id", profileId)
       .maybeSingle();
 
     if (error) throw error;
+    return data;
+  }
 
-    if (data) {
-      setProfile(data);
-      return data;
+  async function ensureProfile(authUser) {
+    const existing = await fetchProfileById(authUser.id);
+
+    if (existing) {
+      setProfile(existing);
+      return existing;
     }
 
     const displayName =
       authUser.user_metadata?.display_name ||
       authUser.user_metadata?.name ||
       deriveNameFromEmail(authUser.email);
-    const metadataHandle = authUser.user_metadata?.handle;
-    const baseHandle = sanitizeHandle(metadataHandle || authUser.email?.split("@")[0]);
+    const baseHandle = sanitizeHandle(
+      authUser.user_metadata?.handle || authUser.email?.split("@")[0] || displayName
+    );
 
-    let profileToInsert = {
+    const profileToInsert = {
       id: authUser.id,
       display_name: displayName,
       handle: baseHandle,
     };
 
-    let insertedResponse = await supabase
+    let inserted = await supabase
       .from("profiles")
       .insert(profileToInsert)
       .select("*")
       .single();
 
-    if (insertedResponse.error?.code === "23505") {
-      profileToInsert = {
-        ...profileToInsert,
-        handle: `${baseHandle}${Math.floor(100 + Math.random() * 900)}`.slice(0, 24),
-      };
+    if (inserted.error?.code === "23505") {
+      const message = `${inserted.error.message || ""} ${inserted.error.details || ""}`;
 
-      insertedResponse = await supabase
+      if (message.includes("profiles_pkey")) {
+        const retryProfile = await fetchProfileById(authUser.id);
+        if (retryProfile) {
+          setProfile(retryProfile);
+          return retryProfile;
+        }
+      }
+
+      inserted = await supabase
         .from("profiles")
-        .insert(profileToInsert)
+        .insert({
+          ...profileToInsert,
+          handle: `${baseHandle}${Math.floor(100 + Math.random() * 900)}`.slice(0, 24),
+        })
         .select("*")
         .single();
+
+      if (inserted.error?.code === "23505") {
+        const retryProfile = await fetchProfileById(authUser.id);
+        if (retryProfile) {
+          setProfile(retryProfile);
+          return retryProfile;
+        }
+      }
     }
 
-    if (insertedResponse.error) throw insertedResponse.error;
+    if (inserted.error) throw inserted.error;
 
-    setProfile(insertedResponse.data);
-    return insertedResponse.data;
+    setProfile(inserted.data);
+    return inserted.data;
   }
 
-  async function loadCrew(currentUserId) {
+  async function loadCrew(currentUserId = user?.id) {
     if (!currentUserId) return [];
 
     const { data, error } = await supabase
@@ -398,50 +422,39 @@ export default function App() {
     return members;
   }
 
-  async function loadPosts(currentUserId = user?.id, members = crewMembers) {
-    if (!currentUserId) {
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-
+  async function loadPosts() {
     const { data: postRows, error: postError } = await supabase
       .from("posts")
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (postError) {
-      setLoading(false);
-      Alert.alert("Supabase error", postError.message);
-      return;
-    }
+    if (postError) throw postError;
 
-    const allowedUserIds = new Set([currentUserId, ...members.map((member) => member.id)]);
-    const filteredPostRows = (postRows || []).filter(
-      (row) => !row.user_id || allowedUserIds.has(row.user_id)
-    );
-    const postIds = filteredPostRows.map((post) => post.id);
+    const postIds = (postRows || []).map((post) => post.id);
     let reactionRows = [];
     let commentRows = [];
 
     if (postIds.length > 0) {
-      const { data: reactionsData } = await supabase
+      const { data: reactionsData, error: reactionsError } = await supabase
         .from("reactions")
         .select("post_id, emoji")
         .in("post_id", postIds);
 
-      const { data: commentsData } = await supabase
+      if (reactionsError) throw reactionsError;
+
+      const { data: commentsData, error: commentsError } = await supabase
         .from("comments")
         .select("id, post_id, user_name, text, created_at")
         .in("post_id", postIds)
         .order("created_at", { ascending: true });
 
+      if (commentsError) throw commentsError;
+
       reactionRows = reactionsData || [];
       commentRows = commentsData || [];
     }
 
-    const builtPosts = filteredPostRows.map((row) => {
+    const builtPosts = (postRows || []).map((row) => {
       const reactions = emptyReactions();
 
       reactionRows
@@ -476,6 +489,18 @@ export default function App() {
     });
 
     setPosts(builtPosts);
+  }
+
+  async function refreshEverything() {
+    if (!user) return;
+
+    setLoading(true);
+    try {
+      await loadCrew(user.id);
+      await loadPosts();
+    } catch (error) {
+      Alert.alert("Refresh failed", error.message);
+    }
     setLoading(false);
   }
 
@@ -483,7 +508,8 @@ export default function App() {
     const cleanEmail = authEmail.trim();
     const cleanPassword = authPassword.trim();
     const cleanDisplayName = authDisplayName.trim();
-    const cleanHandle = sanitizeHandle(authHandle);
+    const cleanHandle = sanitizeHandle(authHandle || cleanDisplayName || cleanEmail.split("@")[0]);
+    const isSignup = authMode === "signup";
 
     if (!cleanEmail || !cleanPassword) {
       Alert.alert("Missing info", "Enter your email and password.");
@@ -495,7 +521,7 @@ export default function App() {
       return;
     }
 
-    if (authMode === "signup" && !cleanDisplayName) {
+    if (isSignup && !cleanDisplayName) {
       Alert.alert("Missing name", "Add a display name.");
       return;
     }
@@ -503,7 +529,7 @@ export default function App() {
     setAuthSaving(true);
 
     try {
-      if (authMode === "signup") {
+      if (isSignup) {
         const { data, error } = await supabase.auth.signUp({
           email: cleanEmail,
           password: cleanPassword,
@@ -523,6 +549,7 @@ export default function App() {
           showToast("Welcome to bevcrew");
         } else {
           showToast("Check your email to confirm");
+          setAuthMode("login");
         }
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({
@@ -553,22 +580,16 @@ export default function App() {
 
   async function uploadImageToSupabase(uri) {
     const fileExt = uri.split(".").pop()?.split("?")[0] || "jpg";
-    const contentType =
-      fileExt.toLowerCase() === "png" ? "image/png" : "image/jpeg";
-    const fileName = `bev-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}.${fileExt}`;
+    const contentType = fileExt.toLowerCase() === "png" ? "image/png" : "image/jpeg";
+    const fileName = `bev-${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
 
     const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
 
-    const { error: uploadError } = await supabase.storage
+    const { error } = await supabase.storage
       .from("bev-photos")
-      .upload(fileName, decode(base64), {
-        contentType,
-        upsert: false,
-      });
+      .upload(fileName, decode(base64), { contentType, upsert: false });
 
-    if (uploadError) throw uploadError;
+    if (error) throw error;
 
     const { data } = supabase.storage.from("bev-photos").getPublicUrl(fileName);
     return data.publicUrl;
@@ -649,16 +670,12 @@ export default function App() {
 
   async function lookupBarcode(code) {
     try {
-      const response = await fetch(
-        `https://world.openfoodfacts.org/api/v2/product/${code}.json`
-      );
+      const response = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json`);
       const data = await response.json();
 
       if (data.status === 1 && data.product) {
         const product = data.product;
-        const foundBrand = product.brands
-          ? product.brands.split(",")[0].trim()
-          : "";
+        const foundBrand = product.brands ? product.brands.split(",")[0].trim() : "";
         const foundName = product.product_name || product.generic_name || "";
 
         if (foundBrand) setBrand(foundBrand);
@@ -678,7 +695,7 @@ export default function App() {
   }
 
   async function postBev() {
-    if (!isStepReady(2)) {
+    if (!isStepReady(2) || !user) {
       Alert.alert("Missing info", "Add the photo, drink details, and rating first.");
       return;
     }
@@ -703,8 +720,9 @@ export default function App() {
       if (error) throw error;
 
       resetPostFlow();
+      setFeedMode("crew");
       setActiveTab("Feed");
-      await loadPosts(user.id, crewMembers);
+      await loadPosts();
       showToast("Posted to crew");
     } catch (error) {
       Alert.alert("Save failed", error.message || "Could not save your bev.");
@@ -747,7 +765,7 @@ export default function App() {
       .then(({ error }) => {
         if (error) {
           Alert.alert("Reaction failed", error.message);
-          loadPosts(user.id, crewMembers);
+          loadPosts();
         }
       });
   }
@@ -815,13 +833,12 @@ export default function App() {
 
     if (error) {
       Alert.alert("Comment failed", error.message);
-      await loadPosts(user.id, crewMembers);
+      await loadPosts();
     }
   }
 
   async function addCrewMember() {
     const handle = sanitizeHandle(crewHandleDraft);
-
     if (!handle || !user) return;
 
     setCrewSaving(true);
@@ -862,8 +879,8 @@ export default function App() {
     }
 
     setCrewHandleDraft("");
-    const members = await loadCrew(user.id);
-    await loadPosts(user.id, members);
+    await loadCrew(user.id);
+    await loadPosts();
     showToast(error?.code === "23505" ? "Already in crew" : "Added to crew");
     setCrewSaving(false);
   }
@@ -882,9 +899,17 @@ export default function App() {
       return;
     }
 
-    const members = await loadCrew(user.id);
-    await loadPosts(user.id, members);
+    await loadCrew(user.id);
+    await loadPosts();
     showToast("Removed from crew");
+  }
+
+  function renderToast() {
+    return toastMessage ? (
+      <View style={styles.toast} pointerEvents="none">
+        <Text style={styles.toastText}>{toastMessage}</Text>
+      </View>
+    ) : null;
   }
 
   function renderAuthScreen() {
@@ -999,27 +1024,12 @@ export default function App() {
       <View style={styles.stepWrap}>
         {steps.map((step, index) => (
           <View key={step} style={styles.stepItem}>
-            <View
-              style={[
-                styles.stepDot,
-                index <= postStep && styles.stepDotActive,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.stepNumber,
-                  index <= postStep && styles.stepNumberActive,
-                ]}
-              >
+            <View style={[styles.stepDot, index <= postStep && styles.stepDotActive]}>
+              <Text style={[styles.stepNumber, index <= postStep && styles.stepNumberActive]}>
                 {index + 1}
               </Text>
             </View>
-            <Text
-              style={[
-                styles.stepLabel,
-                index === postStep && styles.stepLabelActive,
-              ]}
-            >
+            <Text style={[styles.stepLabel, index === postStep && styles.stepLabelActive]}>
               {step}
             </Text>
           </View>
@@ -1042,11 +1052,7 @@ export default function App() {
             <Text style={styles.secondaryButtonText}>Back</Text>
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity
-            style={styles.secondaryButton}
-            onPress={resetPostFlow}
-            disabled={saving}
-          >
+          <TouchableOpacity style={styles.secondaryButton} onPress={resetPostFlow} disabled={saving}>
             <Text style={styles.secondaryButtonText}>Clear</Text>
           </TouchableOpacity>
         )}
@@ -1086,6 +1092,32 @@ export default function App() {
     );
   }
 
+  function renderFeedModeTabs() {
+    return (
+      <View style={styles.feedModeTabs}>
+        <TouchableOpacity
+          style={[styles.feedModeButton, feedMode === "crew" && styles.feedModeButtonActive]}
+          onPress={() => setFeedMode("crew")}
+        >
+          <Text style={[styles.feedModeText, feedMode === "crew" && styles.feedModeTextActive]}>
+            Crew
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.feedModeButton, feedMode === "explore" && styles.feedModeButtonActive]}
+          onPress={() => setFeedMode("explore")}
+        >
+          <Text
+            style={[styles.feedModeText, feedMode === "explore" && styles.feedModeTextActive]}
+          >
+            Explore
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   function renderFeed() {
     if (loading) {
       return (
@@ -1102,28 +1134,33 @@ export default function App() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
+        {renderFeedModeTabs()}
+
         <View style={styles.heroCard}>
           <View style={styles.heroTextWrap}>
-            <Text style={styles.heroTitle}>Crew Feed</Text>
-            <Text style={styles.heroText}>Posts from you and your crew.</Text>
+            <Text style={styles.heroTitle}>{feedMode === "crew" ? "Crew Feed" : "Explore"}</Text>
+            <Text style={styles.heroText}>
+              {feedMode === "crew"
+                ? "Posts from you and your crew."
+                : "Find new bevs and people to follow later."}
+            </Text>
           </View>
 
-          <TouchableOpacity
-            style={styles.heroButton}
-            onPress={() => setActiveTab("Post")}
-          >
+          <TouchableOpacity style={styles.heroButton} onPress={() => setActiveTab("Post")}>
             <Text style={styles.heroButtonText}>Post</Text>
           </TouchableOpacity>
         </View>
 
-        {posts.length === 0 ? (
+        {visiblePosts.length === 0 ? (
           <View style={styles.feedCard}>
-            <Text style={styles.bevName}>No crew posts yet</Text>
-            <Text style={styles.flavorName}>Post a drink or add someone by handle.</Text>
+            <Text style={styles.bevName}>No posts here yet</Text>
+            <Text style={styles.flavorName}>
+              {feedMode === "crew" ? "Post a drink or add someone by handle." : "Explore will fill up as more people join."}
+            </Text>
           </View>
         ) : null}
 
-        {posts.map((post) => {
+        {visiblePosts.map((post) => {
           const visibleReactions = getVisibleReactionEntries(post.reactions);
 
           return (
@@ -1209,10 +1246,7 @@ export default function App() {
                   }
                 />
 
-                <TouchableOpacity
-                  style={styles.commentButton}
-                  onPress={() => addComment(post.id)}
-                >
+                <TouchableOpacity style={styles.commentButton} onPress={() => addComment(post.id)}>
                   <Text style={styles.commentButtonText}>➤</Text>
                 </TouchableOpacity>
               </View>
@@ -1261,19 +1295,14 @@ export default function App() {
             style={styles.camera}
             facing="back"
             onBarcodeScanned={scanned ? undefined : handleBarcodeScanned}
-            barcodeScannerSettings={{
-              barcodeTypes: ["ean13", "ean8", "upc_a", "upc_e"],
-            }}
+            barcodeScannerSettings={{ barcodeTypes: ["ean13", "ean8", "upc_a", "upc_e"] }}
           />
 
           <View style={styles.scannerOverlay}>
             <Text style={styles.scannerTitle}>Scan barcode</Text>
             <Text style={styles.scannerText}>Center the barcode in the box.</Text>
             <View style={styles.scanBox} />
-            <TouchableOpacity
-              style={styles.scannerClose}
-              onPress={() => setScannerOpen(false)}
-            >
+            <TouchableOpacity style={styles.scannerClose} onPress={() => setScannerOpen(false)}>
               <Text style={styles.scannerCloseText}>Cancel</Text>
             </TouchableOpacity>
           </View>
@@ -1286,10 +1315,7 @@ export default function App() {
         style={styles.content}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-        >
+        <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
           <Text style={styles.screenTitle}>Today’s Bev</Text>
           <Text style={styles.screenSubtitle}>Snap, scan, rate, post.</Text>
 
@@ -1310,9 +1336,7 @@ export default function App() {
                 )}
 
                 <View style={styles.photoActionArea}>
-                  <Text style={styles.photoStatus}>
-                    {imageUri ? "Photo ready" : "No photo yet"}
-                  </Text>
+                  <Text style={styles.photoStatus}>{imageUri ? "Photo ready" : "No photo yet"}</Text>
                   <Text style={styles.photoSubtext}>
                     {imageUri ? "Retake or keep going." : "Use the feed shape."}
                   </Text>
@@ -1372,12 +1396,7 @@ export default function App() {
                     style={[styles.chip, category === item && styles.chipActive]}
                     onPress={() => setCategory(item)}
                   >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        category === item && styles.chipTextActive,
-                      ]}
-                    >
+                    <Text style={[styles.chipText, category === item && styles.chipTextActive]}>
                       {item}
                     </Text>
                   </TouchableOpacity>
@@ -1392,9 +1411,7 @@ export default function App() {
               <Text style={styles.cardHint}>Pick a rating. Caption is optional.</Text>
 
               <View style={styles.reviewSummaryCard}>
-                {imageUri ? (
-                  <Image source={{ uri: imageUri }} style={styles.reviewThumbnail} />
-                ) : null}
+                {imageUri ? <Image source={{ uri: imageUri }} style={styles.reviewThumbnail} /> : null}
 
                 <View style={styles.reviewTextWrap}>
                   <Text style={styles.reviewBrand}>{brand || "Brand"}</Text>
@@ -1405,19 +1422,14 @@ export default function App() {
 
               <View style={styles.ratingHeaderRow}>
                 <Text style={styles.inputLabel}>Rating</Text>
-                <Text style={styles.ratingSelected}>
-                  {rating ? `${rating}/10` : "pick one"}
-                </Text>
+                <Text style={styles.ratingSelected}>{rating ? `${rating}/10` : "pick one"}</Text>
               </View>
 
               <View style={styles.ratingGrid}>
                 {RATINGS.map((num) => (
                   <TouchableOpacity
                     key={num}
-                    style={[
-                      styles.ratingBubble,
-                      rating === num && styles.ratingBubbleActive,
-                    ]}
+                    style={[styles.ratingBubble, rating === num && styles.ratingBubbleActive]}
                     onPress={() => setRating(num)}
                   >
                     <Text
@@ -1455,38 +1467,41 @@ export default function App() {
     );
   }
 
-  function renderHistory() {
+  function renderHistoryPreview() {
     return (
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        <Text style={styles.screenTitle}>Bev History</Text>
-        <Text style={styles.screenSubtitle}>Your personal can trail.</Text>
+      <View style={styles.crewCard}>
+        <View style={styles.crewTitleRow}>
+          <Text style={styles.cardTitle}>History</Text>
+          <TouchableOpacity style={styles.smallPillButton} onPress={() => setHistoryOpen(!historyOpen)}>
+            <Text style={styles.smallPillText}>{historyOpen ? "Hide" : "Show"}</Text>
+          </TouchableOpacity>
+        </View>
 
-        {myPosts.length === 0 ? (
-          <View style={styles.feedCard}>
-            <Text style={styles.bevName}>No posts yet</Text>
-            <Text style={styles.flavorName}>Your posts will show up here.</Text>
-          </View>
-        ) : null}
+        {!historyOpen ? (
+          <Text style={styles.crewEmpty}>Your past drinks live here now.</Text>
+        ) : myPosts.length === 0 ? (
+          <Text style={styles.crewEmpty}>No posts yet.</Text>
+        ) : (
+          myPosts.map((post) => (
+            <View key={post.id} style={styles.historyItem}>
+              {post.imageUri ? (
+                <Image source={{ uri: post.imageUri }} style={styles.historyImage} />
+              ) : (
+                <View style={styles.historyPlaceholder}>
+                  <Text style={styles.photoText}>no photo</Text>
+                </View>
+              )}
 
-        {myPosts.map((post) => (
-          <View key={post.id} style={styles.historyItem}>
-            {post.imageUri ? (
-              <Image source={{ uri: post.imageUri }} style={styles.historyImage} />
-            ) : (
-              <View style={styles.historyPlaceholder}>
-                <Text style={styles.photoText}>no photo</Text>
+              <View style={styles.historyText}>
+                <Text style={styles.historyDate}>{post.date}</Text>
+                <Text style={styles.historyBev}>{post.brand}</Text>
+                <Text style={styles.historyFlavor}>{post.flavor}</Text>
+                <Text style={styles.historyRating}>{formatRating(post.rating)}</Text>
               </View>
-            )}
-
-            <View style={styles.historyText}>
-              <Text style={styles.historyDate}>{post.date}</Text>
-              <Text style={styles.historyBev}>{post.brand}</Text>
-              <Text style={styles.historyFlavor}>{post.flavor}</Text>
-              <Text style={styles.historyRating}>{formatRating(post.rating)}</Text>
             </View>
-          </View>
-        ))}
-      </ScrollView>
+          ))
+        )}
+      </View>
     );
   }
 
@@ -1512,7 +1527,7 @@ export default function App() {
             </View>
 
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{streak}</Text>
+              <Text style={styles.statNumber}>{myPosts.length}</Text>
               <Text style={styles.statLabel}>streak</Text>
             </View>
 
@@ -1522,6 +1537,8 @@ export default function App() {
             </View>
           </View>
         </View>
+
+        {renderHistoryPreview()}
 
         <View style={styles.crewCard}>
           <View style={styles.crewTitleRow}>
@@ -1558,10 +1575,7 @@ export default function App() {
                 <Text style={styles.crewHandle}>@{member.handle}</Text>
               </View>
 
-              <TouchableOpacity
-                style={styles.removeButton}
-                onPress={() => removeCrewMember(member.id)}
-              >
+              <TouchableOpacity style={styles.removeButton} onPress={() => removeCrewMember(member.id)}>
                 <Text style={styles.removeButtonText}>Remove</Text>
               </TouchableOpacity>
             </View>
@@ -1644,17 +1658,11 @@ export default function App() {
             />
 
             <View style={styles.customEmojiActions}>
-              <TouchableOpacity
-                style={styles.modalCancelButton}
-                onPress={closeCustomEmojiPicker}
-              >
+              <TouchableOpacity style={styles.modalCancelButton} onPress={closeCustomEmojiPicker}>
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.modalConfirmButton}
-                onPress={addCustomReaction}
-              >
+              <TouchableOpacity style={styles.modalConfirmButton} onPress={addCustomReaction}>
                 <Text style={styles.modalConfirmText}>React</Text>
               </TouchableOpacity>
             </View>
@@ -1664,12 +1672,33 @@ export default function App() {
     );
   }
 
-  function renderToast() {
-    return toastMessage ? (
-      <View style={styles.toast} pointerEvents="none">
-        <Text style={styles.toastText}>{toastMessage}</Text>
+  function renderBottomNav() {
+    return (
+      <View style={styles.bottomNav}>
+        <TouchableOpacity
+          style={styles.navSideButton}
+          onPress={() => setActiveTab("Feed")}
+        >
+          <Text style={[styles.navText, activeTab === "Feed" && styles.navTextActive]}>Feed</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.postNavButton, activeTab === "Post" && styles.postNavButtonActive]}
+          onPress={() => setActiveTab("Post")}
+        >
+          <Text style={styles.postNavPlus}>＋</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.navSideButton}
+          onPress={() => setActiveTab("Profile")}
+        >
+          <Text style={[styles.navText, activeTab === "Profile" && styles.navTextActive]}>
+            Profile
+          </Text>
+        </TouchableOpacity>
       </View>
-    ) : null;
+    );
   }
 
   if (authChecking) {
@@ -1710,41 +1739,17 @@ export default function App() {
               <Text style={styles.subtitle}>@{profileHandle}</Text>
             </View>
 
-            <View style={styles.headerRight}>
-              <TouchableOpacity style={styles.themeButton} onPress={toggleTheme}>
-                <Text style={styles.themeButtonText}>
-                  {themeMode === "dark" ? "Light" : "Dark"}
-                </Text>
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity style={styles.themeButton} onPress={toggleTheme}>
+              <Text style={styles.themeButtonText}>{themeMode === "dark" ? "Light" : "Dark"}</Text>
+            </TouchableOpacity>
           </View>
         ) : null}
 
         {activeTab === "Feed" && renderFeed()}
         {activeTab === "Post" && renderPostFlow()}
-        {activeTab === "History" && renderHistory()}
         {activeTab === "Profile" && renderProfile()}
 
-        {!scannerOpen && !customCameraOpen ? (
-          <View style={styles.tabs}>
-            {["Feed", "Post", "History", "Profile"].map((tab) => (
-              <TouchableOpacity
-                key={tab}
-                style={[styles.tab, activeTab === tab && styles.activeTab]}
-                onPress={() => setActiveTab(tab)}
-              >
-                <Text
-                  style={[
-                    styles.tabText,
-                    activeTab === tab && styles.activeTabText,
-                  ]}
-                >
-                  {tab}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        ) : null}
+        {!scannerOpen && !customCameraOpen ? renderBottomNav() : null}
 
         {renderToast()}
         {renderReactionPicker()}
@@ -1863,11 +1868,6 @@ function createStyles(theme) {
       fontSize: 13,
       marginTop: 2,
     },
-    headerRight: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 8,
-    },
     themeButton: {
       backgroundColor: theme.surface,
       borderColor: theme.border,
@@ -1897,6 +1897,31 @@ function createStyles(theme) {
       fontSize: 14,
       marginBottom: 18,
     },
+    feedModeTabs: {
+      flexDirection: "row",
+      backgroundColor: theme.surface,
+      padding: 5,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.border,
+      marginBottom: 14,
+    },
+    feedModeButton: {
+      flex: 1,
+      paddingVertical: 11,
+      borderRadius: 999,
+      alignItems: "center",
+    },
+    feedModeButtonActive: {
+      backgroundColor: theme.primary,
+    },
+    feedModeText: {
+      color: theme.muted,
+      fontWeight: "900",
+    },
+    feedModeTextActive: {
+      color: "#0B0D0C",
+    },
     heroCard: {
       backgroundColor: theme.primarySoft,
       borderRadius: 26,
@@ -1921,6 +1946,7 @@ function createStyles(theme) {
     heroText: {
       color: theme.muted,
       marginTop: 4,
+      lineHeight: 20,
     },
     heroButton: {
       backgroundColor: theme.primary,
@@ -2660,54 +2686,6 @@ function createStyles(theme) {
       textAlignVertical: "top",
       lineHeight: 22,
     },
-    historyItem: {
-      backgroundColor: theme.surface,
-      padding: 12,
-      borderRadius: 24,
-      marginBottom: 12,
-      borderWidth: 1,
-      borderColor: theme.border,
-      flexDirection: "row",
-      gap: 12,
-      alignItems: "center",
-    },
-    historyImage: {
-      width: 86,
-      aspectRatio: 4 / 5,
-      borderRadius: 18,
-      backgroundColor: theme.surface2,
-    },
-    historyPlaceholder: {
-      width: 86,
-      aspectRatio: 4 / 5,
-      borderRadius: 18,
-      backgroundColor: theme.surface2,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    historyText: {
-      flex: 1,
-    },
-    historyDate: {
-      color: theme.primary,
-      fontWeight: "900",
-      marginBottom: 4,
-    },
-    historyBev: {
-      color: theme.text,
-      fontSize: 17,
-      fontWeight: "900",
-    },
-    historyFlavor: {
-      color: theme.muted,
-      marginTop: 2,
-      fontWeight: "700",
-    },
-    historyRating: {
-      color: theme.accent,
-      marginTop: 8,
-      fontWeight: "900",
-    },
     profileCard: {
       backgroundColor: theme.surface,
       borderRadius: 30,
@@ -2794,6 +2772,19 @@ function createStyles(theme) {
       justifyContent: "space-between",
       marginBottom: 10,
     },
+    smallPillButton: {
+      backgroundColor: theme.surface2,
+      borderRadius: 999,
+      paddingHorizontal: 13,
+      paddingVertical: 8,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    smallPillText: {
+      color: theme.text,
+      fontWeight: "900",
+      fontSize: 12,
+    },
     crewAddRow: {
       flexDirection: "row",
       gap: 8,
@@ -2857,6 +2848,54 @@ function createStyles(theme) {
       fontWeight: "900",
       fontSize: 12,
     },
+    historyItem: {
+      backgroundColor: theme.surface2,
+      padding: 10,
+      borderRadius: 20,
+      marginTop: 8,
+      borderWidth: 1,
+      borderColor: theme.border,
+      flexDirection: "row",
+      gap: 12,
+      alignItems: "center",
+    },
+    historyImage: {
+      width: 72,
+      aspectRatio: 4 / 5,
+      borderRadius: 16,
+      backgroundColor: theme.surface2,
+    },
+    historyPlaceholder: {
+      width: 72,
+      aspectRatio: 4 / 5,
+      borderRadius: 16,
+      backgroundColor: theme.surface,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    historyText: {
+      flex: 1,
+    },
+    historyDate: {
+      color: theme.primary,
+      fontWeight: "900",
+      marginBottom: 4,
+    },
+    historyBev: {
+      color: theme.text,
+      fontSize: 17,
+      fontWeight: "900",
+    },
+    historyFlavor: {
+      color: theme.muted,
+      marginTop: 2,
+      fontWeight: "700",
+    },
+    historyRating: {
+      color: theme.accent,
+      marginTop: 8,
+      fontWeight: "900",
+    },
     signOutButton: {
       backgroundColor: theme.surface,
       borderRadius: 20,
@@ -2871,35 +2910,58 @@ function createStyles(theme) {
       fontWeight: "900",
       fontSize: 16,
     },
-    tabs: {
+    bottomNav: {
+      height: 76,
       flexDirection: "row",
-      padding: 10,
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 22,
       borderTopWidth: 1,
       borderTopColor: theme.border,
       backgroundColor: theme.tab,
     },
-    tab: {
-      flex: 1,
-      paddingVertical: 11,
-      borderRadius: 16,
+    navSideButton: {
+      width: 110,
       alignItems: "center",
+      paddingVertical: 12,
     },
-    activeTab: {
-      backgroundColor: theme.primary,
-    },
-    tabText: {
+    navText: {
       color: theme.muted,
       fontWeight: "900",
-      fontSize: 12,
+      fontSize: 15,
     },
-    activeTabText: {
+    navTextActive: {
+      color: theme.primary,
+    },
+    postNavButton: {
+      width: 62,
+      height: 62,
+      borderRadius: 31,
+      backgroundColor: theme.primary,
+      alignItems: "center",
+      justifyContent: "center",
+      marginTop: -26,
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 12,
+      elevation: 8,
+      borderWidth: 4,
+      borderColor: theme.tab,
+    },
+    postNavButtonActive: {
+      transform: [{ scale: 1.05 }],
+    },
+    postNavPlus: {
       color: "#0B0D0C",
+      fontSize: 38,
+      fontWeight: "900",
+      marginTop: -4,
     },
     toast: {
       position: "absolute",
       left: 20,
       right: 20,
-      bottom: 84,
+      bottom: 92,
       backgroundColor: theme.text,
       borderRadius: 999,
       paddingVertical: 12,
